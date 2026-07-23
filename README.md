@@ -8,15 +8,17 @@ This document is a working scratchpad for the mathematical model.
 ## Overview
 
 ```
-zones.gpkg + network.gpkg + supply.csv + demand.csv
+zones.gpkg + network.gpkg
+supply.csv + demand.csv + batch_size_distribution.csv
+vehicles.csv + departure_distribution.csv
         │
         ▼
 1. Agent Synthesis
-   atom placement on links → combination → agents.gpkg
+   depletion loop → agents.gpkg (points)
         │
         ▼
 2. Spatial Pairing
-   probabilistic matching via logistic decay → desire_lines.gpkg
+   Euclidean logistic decay + batch size draws → desire_lines.gpkg
         │
         ▼
 3. (Optional) Consolidation
@@ -35,124 +37,145 @@ zones.gpkg + network.gpkg + supply.csv + demand.csv
    sequential period Dijkstra + BPR → loaded_links.gpkg
         │
         ▼
-7. Emissions + KPIs
+7. Emissions
+   COPERT V polynomial (exhaust) + flat factors (non-exhaust) → emissions.gpkg
 ```
 
 ---
 
-## Inputs
+## Input Files
 
-### `zones.gpkg`
-Zone polygons. Required field: `zone_id`. Geometry: Polygon.
-
-### `network.gpkg`
-Directed road network. Required fields: `road_type`, `grade_pct`. Geometry: LineString.
-Speed per road type supplied in config. Distance derived from geometry length.
+| file | provided by | purpose |
+|---|---|---|
+| `zones.gpkg` | user | zone polygons |
+| `network.gpkg` | user | road type, grade, geometry |
+| `supply.csv` | user | supply totals by stratum and zone |
+| `demand.csv` | user | demand totals by stratum and zone |
+| `batch_size_distribution.csv` | user | resource flow granularity |
+| `vehicles.csv` | user | vehicle types, capacities, costs, COPERT V category |
+| `departure_distribution.csv` | user | TOD PMF per resource |
+| `emission_factors.csv` | user or bundled | non-exhaust flat g/km per (vehicle type, pollutant) |
+| COPERT V coefficients | bundled (parametrizable) | exhaust polynomial coefficients |
+| config | user | BPR params, logistic decay α/β, MNL ASCs/betas, road type speeds |
 
 ### `supply.csv` and `demand.csv`
 
-One row per stratum. Columns:
+One row per stratum per zone:
 
 | column | type | description |
 |---|---|---|
 | `zone_id` | string | zone this stratum belongs to |
 | stratum cols | string | any number of user-defined dimension columns |
-| resource cols | integer | quantity of each resource per stratum |
+| resource cols | integer | total quantity of each resource for this stratum in this zone |
 
-Resources are any named quantities the user defines: `am_commuters`, `pm_commuters`, `parcels`, `freight_kg`, `green_parcels`, `consolidated_parcels`, etc. Strata columns can differ between supply.csv and demand.csv. Resource units should be chosen for the precision needed — if sub-tonne precision is required, use `freight_kg` not `freight_tonnes`.
+Resources are any named quantities: `am_commuters`, `pm_commuters`, `parcels`, `freight_kg`, etc. UCCs, microhubs, ZEZ households are just strata — no special modules.
 
-UCCs, microhubs, ZEZ households, catchment zones are all just strata in these two files. No special modules or hardcoded agent types.
+### `batch_size_distribution.csv`
+
+| column | description |
+|---|---|
+| `units` | integer unit count (e.g. 1, 2, 3, 10, 20, 50) |
+| one column per resource | probability of a flow batch being this many units |
+
+Each resource column sums to 1. Represents how large individual resource flows are between supply and demand agents — a shipment size, a delivery run, a commute trip.
 
 ---
 
 ## 1. Agent Synthesis
 
-Agents are not specified directly. They emerge from atom placement and combination.
-
-### Atom count per stratum
-
-For each stratum row $s$, the number of atoms to place is:
-
-$$N_s = \max_r(\text{resource}_{rs})$$
-
-the maximum resource count across all resource columns. This preserves the spatial resolution of the highest-volume resource. Other resources are attributed fractionally per atom.
-
 ### Stratum selection weight
 
-Each atom draws its stratum from a CDF over strata. The weight for stratum $s$ is the weighted average of its resource shares across all resources:
+For each stratum row $s$, its probability weight for agent synthesis is the weighted average of its resource shares across all resources:
 
 $$w_s = \sum_r \lambda_r \cdot p_{sr}, \qquad p_{sr} = \frac{\text{resource}_{rs}}{\sum_{s'} \text{resource}_{rs'}}$$
 
-where $\lambda_r$ are user-defined resource weights (default $1/R$ each, must sum to 1). Setting $\lambda_r = 0$ excludes a resource from stratum selection without removing it from attribution. Since each $p_{sr}$ sums to 1 over strata, and $\sum_r \lambda_r = 1$, the weights $w_s$ sum to 1 by construction — no normalisation needed.
+where $\lambda_r$ are user-defined resource weights (default $1/R$, sum to 1). Setting $\lambda_r = 0$ excludes a resource from stratum selection without removing it from the depletion process. The $w_s$ sum to 1 by construction.
 
-### Atom placement
+### Size draw
 
-For each zone $z$:
+For each agent, one uniform draw $u \sim U[0,1]$ determines its size across all resources simultaneously. For each resource $r$, apply inverse CDF on its column in `batch_size_distribution.csv`:
 
-1. Collect all road network links intersecting zone $z$
-2. Weight links by length: $P(\ell) \propto \text{length}_\ell$
-3. For each atom: draw a link from this distribution, then draw a position uniformly along that link
-4. Assign stratum via inverse CDF on $w_s$
+$$\text{units}_r = F_r^{-1}(u)$$
 
-### Agent formation
+Using the same $u$ across all resources induces positive rank correlation — a large agent for one resource tends to be large for others — which is appropriate since agent size reflects a single underlying latent factor (household size, firm size).
 
-Atoms of the same stratum landing on the same link combine into one agent. The agent's location is the centroid of its constituent atom positions. Resource quantities for agent $a$ formed from $n_a$ atoms of stratum $s$:
+### Depletion loop
 
-$$q_a^r = n_a \cdot \frac{\text{resource}_{rs}}{N_s}$$
+For each stratum $s$ in zone $z$:
 
-At most one agent per (link, stratum, zone) combination — this is a natural spatial resolution limit tied to the road network density.
+```
+while any(remaining_r > 0 for r in resources):
+    draw u ~ U[0,1]
+    draw (x, y) ~ Uniform(zone_z polygon), redraw if outside polygon
+    for each r: assign min(units_r(u), remaining_r) to agent
+    for each r: remaining_r -= units_r(u)
+```
 
-### Supply and demand attribution
+Agent count per stratum-zone is not predetermined — it emerges from the depletion. Late draws may receive less than their size class for resources already near depletion; this is intentional.
 
-An agent can belong to different strata in supply.csv and demand.csv. Using the same uniform draw for both implies correlated supply and demand strata, which is appropriate when the same characteristics drive both. The agent's supply and demand quantities for each resource are read from the matching stratum rows.
+Agents are **points** — no radius, no territory. GIS geometry is Point for agents, Polygon for zones, LineString for network and desire lines.
+
+### Output
+
+`supply_agents.gpkg` and `demand_agents.gpkg` — one point per agent:
+
+| field | description |
+|---|---|
+| geometry | Point (random location within zone polygon) |
+| `zone_id` | zone |
+| stratum cols | inherited from stratum row |
+| resource cols | actual quantities after depletion clamping |
 
 ---
 
 ## 2. Spatial Pairing — Desire Lines
 
-### Grade-weighted time-based Dijkstra
+### Euclidean distance and logistic decay
 
-Edge cost for link $\ell$ with distance $d_\ell$ (m), road type speed $v_\ell$ (m/s), and grade $s_\ell$ (%):
+Pairing uses Euclidean distance, not network distance. At the pairing stage, actual routes are unknown (they depend on VDF-adjusted Dijkstra computed later). Free-flow Dijkstra would be a less honest approximation than straight-line distance, which makes no claims about routing.
 
-$$C_\ell = w_1 \cdot \frac{d_\ell}{v_\ell} + w_2 \cdot |s_\ell| \cdot d_\ell$$
+$$f(d) = \frac{1}{1 + \exp(\alpha + \beta \ln d)}$$
 
-Links with $|s_\ell| > 6\%$ are excluded (COPERT V validity range). Single-source Dijkstra runs once per unique origin node and is cached. This cache is also used for network assignment period 0.
-
-### Logistic decay
-
-$$f(c) = \frac{1}{1 + \exp(\alpha + \beta \ln c)}$$
-
-Parameters $\alpha$ and $\beta$ are resource-specific and require calibration from observed flow data.
+where $d$ is Euclidean distance between agent locations. Parameters $\alpha$ and $\beta$ are resource-specific, require calibration from observed flow data.
 
 ### Desire line hard cap
 
-Before pairing, drop any agent pair $(i, j)$ where the free-flow Dijkstra travel time exceeds `max_trip_duration`. Report dropped pairs as unserviceable demand.
+Before pairing, compute free-flow Dijkstra travel time $t_{ij}$ for each supply-demand node pair (snapping agent locations to nearest network nodes). Drop any pair where:
 
-### Probabilistic matching
+- **Cargo** (`returns_empty: true`): $t_{ij} + t_{ji} > \text{max\_shift\_duration}$ — round trip must fit in driver shift
+- **Person trips** (`returns_empty: false`): $t_{ij} > \text{max\_trip\_duration}$ — one-way only; return is a separate resource
 
-For each resource $r$, determine the limiter — whichever side has smaller total:
+Report dropped pairs as unserviceable.
 
-- **Supply is limiter** ($\sum_i P_i^r < \sum_j A_j^r$): iterate over supply atoms; for each atom at agent $i$ draw destination $j$:
+### Probabilistic matching with batch sizes
 
-$$P(j \mid i) = \frac{A_j^r \cdot f(c_{ij})}{\sum_k A_k^r \cdot f(c_{ik})}$$
+For each resource $r$, determine the limiter (smaller total across all agents). Exhaust the limiter:
 
-- **Demand is limiter** ($\sum_j A_j^r < \sum_i P_i^r$): iterate over demand atoms; for each atom at agent $j$ draw origin $i$:
+```
+while any(remaining_r > 0):
+    draw supply agent i  with P(i) ∝ remaining Q_i^r
+    draw demand agent j  with P(j|i) ∝ remaining Q_j^r · f(d_ij)
+    draw batch size b from batch_size_distribution for resource r
+    transfer = min(b, remaining Q_i^r, remaining Q_j^r)
+    subtract transfer from both; accumulate on desire line (i, j)
+```
 
-$$P(i \mid j) = \frac{P_i^r \cdot f(c_{ij})}{\sum_k P_k^r \cdot f(c_{kj})}$$
+Desire lines between the same $(i, j)$ pair accumulate across draws. Unfulfilled supply or demand is reported as simulation output (unmatched workers, undelivered parcels, etc.).
 
-One draw per atom produces one desire line. Desire lines between the same $(i, j)$ pair accumulate. Iterating over the limiter side gives a computational bonus — fewer atoms to exhaust. Unfulfilled supply or demand is reported as a simulation output (unmatched workers, undelivered parcels, etc.).
+### Return trips
+
+- **Cargo** (`returns_empty: true`): for each desire line $(i, j)$, generate a reverse desire line $(j, i)$ with the same vehicle type and load = 0. Adds empty vehicle-km to network loading and emissions.
+- **Person trips** (`returns_empty: false`): return is modeled as a separate resource (e.g. `pm_commuters` is the return of `am_commuters`). No automatic empty return.
 
 ### Output
 
-`desire_lines.gpkg` — one LineString per $(i, j, \text{resource})$ pair with nonzero accumulated flow.
+`desire_lines.gpkg` — one LineString per $(i, j, \text{resource})$ with accumulated flow.
 
 ---
 
 ## 3. Optional: Consolidation
 
-Before vehicle assignment, aggregate desire lines by stratum to model consolidation points (microhubs, zone pickups, carrier depots).
-
-Config:
+Aggregate desire lines by stratum before vehicle assignment:
 
 ```yaml
 consolidations:
@@ -164,53 +187,51 @@ consolidations:
     group_by: [carrier_id, zone_id]
 ```
 
-Each entry sums flows with matching `group_by` values into one consolidated desire line. Reduces many small flows into fewer large ones before vehicle assignment.
+Reduces many small flows into fewer large ones. Consolidated location: TBD (centroid of grouped agents or largest agent's node).
 
-Consolidated location rule: TBD (centroid of grouped agents, or largest agent's node).
-
-Note: consolidation via chaining (defining a UCC stratum that demands one resource and supplies another) is a complementary mechanism and is orthogonal to this step.
+Chaining (defining a UCC stratum that receives one resource and supplies another) is complementary and orthogonal to this step.
 
 ---
 
 ## 4. Vehicle Assignment
 
-For each desire line $(i, j, r)$ with flow quantity $Q$:
+For each desire line $(i, j, r)$ with accumulated flow $Q$:
 
 ### MNL over vehicle types
 
-Eligible vehicle types for resource $r$ are user-defined. Systematic utility of vehicle $v$:
+Eligible vehicle types per resource are user-defined. Systematic utility:
 
 $$V_v = \alpha_v^r + \beta_1 \cdot \frac{Q}{C_v} + \beta_2 \cdot c_{ij} \cdot \text{cost}_v$$
 
-where $C_v$ is vehicle capacity in resource units (kg, parcels, persons) and $\text{cost}_v$ is cost per unit distance. Choice probability:
+Choice probability:
 
 $$P(v \mid i, j, r) = \frac{\exp(V_v)}{\sum_k \exp(V_k)}$$
 
-Simple case: user provides a vehicle PMF directly per resource. This is equivalent to ASC-only MNL ($\beta = 0$) — the distribution does not vary by flow size or distance.
+Simple case: user provides vehicle PMF directly per resource (ASC-only MNL, $\beta = 0$).
 
 ### Trip count
 
 $$n_{\text{trips}} = \left\lceil \frac{Q}{C_v} \right\rceil, \quad v \sim P(v \mid i, j, r)$$
 
+Load: $\lfloor Q / C_v \rfloor$ trips at 100%, one remainder trip at $(Q \bmod C_v) / C_v$.
+
 ### Commutes
 
-Commute resources (`am_commuters`, `pm_commuters`, etc.) use mode choice MNL where vehicle types are transport modes (car, transit, bike, walk). Car capacity = 1 person (or average occupancy). Only car mode loads the road network; other modes do not contribute to network flows or emissions in the current model.
+Vehicle types are transport modes (car, transit, bike, walk). Car capacity = 1 person (or average occupancy). Only car loads the road network.
 
 ---
 
 ## 5. Departure Time Assignment
 
-Each resource has a user-defined TOD PMF — non-negative values summing to 1 over simulation periods. Converted internally to a CDF.
+Each resource has a TOD PMF (non-negative, sums to 1 over simulation periods) in `departure_distribution.csv`. Converted internally to CDF.
 
 ### Feasibility truncation
 
-For each trip on desire line $(i, j)$ with free-flow travel time $t_{ij}$:
+Latest feasible departure for trip $(i, j)$:
 
-$$t_{\text{latest}} = t_{\text{sim\_end}} - t_{ij}$$
+$$t_{\text{latest}} = t_{\text{sim\_end}} - t_{ij} \quad \text{(one-way)} \qquad \text{or} \qquad t_{\text{sim\_end}} - (t_{ij} + t_{ji}) \quad \text{(round trip)}$$
 
-Truncate the TOD PMF at $t_{\text{latest}}$, renormalize, draw departure time from the truncated CDF. Trips with zero PMF mass before the cutoff are reported as unserviceable and dropped.
-
-This means longer trips automatically receive earlier expected departure times — behaviorally correct, as long-distance drivers depart earlier to complete within the operating window.
+Truncate TOD PMF at $t_{\text{latest}}$, renormalize, draw departure time. Trips with zero PMF mass before cutoff are reported as unserviceable. Longer trips automatically receive earlier expected departures — behaviorally correct.
 
 ---
 
@@ -218,26 +239,26 @@ This means longer trips automatically receive earlier expected departure times �
 
 ### Routing model
 
-Vehicles know only the network state at their departure time (the Google Maps model — route on current conditions, no foreknowledge of future congestion). Dijkstra is run at departure time with current link speeds; the route is fixed from that point. No time-dependent Dijkstra.
+Vehicles route on the network state at departure time — the Google Maps model. No time-dependent Dijkstra. Routes are fixed at departure and do not update mid-trip.
 
 ### Loading model
 
-After routing, each vehicle is traced link by link with accumulated travel time. Each link is attributed to the simulation period during which the vehicle actually traverses it — traversal-time loading, not departure-time loading. This means vehicles still in transit from an earlier period contribute to the current period's link flows, which is realistic.
+Routes are traced link by link with accumulated travel time. Each link is attributed to the period the vehicle actually traverses it (traversal-time loading). Vehicles still in transit from earlier periods contribute to the current period's link flows.
 
 ### Period 0
 
-Free-flow speeds. Routes computed from the Dijkstra cache built in the pairing step — no recomputation.
+Free-flow speeds from config (or vehicle × road type file). Dijkstra runs once per unique origin node and is cached.
 
 ### Period $h > 0$
 
-1. Route all vehicles departing in period $h$ using current link speeds $v_\ell^h$
-2. Trace routes; attribute each link to the traversal period
-3. Compute link flows $q_\ell^h$ (vehicles per period per link)
-4. Update speeds via BPR for period $h+1$:
+1. Route departing vehicles using current link speeds $v_\ell^h$
+2. Trace routes, attribute links to traversal period
+3. Count flows $q_\ell^h$ per link
+4. Update speeds via BPR:
 
 $$v_\ell^{h+1} = \frac{v_\ell^0}{1 + \alpha \left(\dfrac{q_\ell^h}{Q_\ell}\right)^\beta}$$
 
-Default parameters: $\alpha = 0.15$, $\beta = 4$ (Bureau of Public Roads). Link capacity $Q_\ell$ (vehicles/period) is user-supplied per road type. Re-run Dijkstra with updated weights at the start of each period.
+Default: $\alpha = 0.15$, $\beta = 4$. Capacity $Q_\ell$ user-supplied per road type. Re-run Dijkstra with updated weights at the start of each period.
 
 ### Output
 
@@ -246,39 +267,42 @@ Default parameters: $\alpha = 0.15$, $\beta = 4$ (Bureau of Public Roads). Link 
 | field | description |
 |---|---|
 | geometry | LineString |
-| `road_type`, `grade_pct` | inherited from network |
+| `road_type`, `grade_pct` | from network |
 | `period` | simulation period index |
 | `vehicle_type` | vehicle type |
-| `n_trips` | vehicles traversing this link in this period |
-| `velocity_kmh` | speed used for routing this period (BPR-adjusted) |
+| `n_trips` | vehicles on this link in this period |
+| `velocity_kmh` | BPR-adjusted speed for this period |
 
 ---
 
 ## 7. Emissions
 
-### Exhaust emissions (COPERT V)
+### Exhaust — COPERT V polynomial
 
 $$\text{EF} \ [\text{g/km}] = \frac{\alpha V^2 + \beta V + \gamma + \delta/V}{\varepsilon V^2 + \zeta V + \eta} \cdot (1 - \text{RF})$$
 
-Factor table keyed by (vehicle type, pollutant, grade pct, load pct). Speed $V$ comes from `velocity_kmh` in the loaded links. Grade is bilinearly interpolated; links with $|\text{grade}| > 6\%$ were excluded at the network level.
+Coefficients ($\alpha, \beta, \gamma, \delta, \varepsilon, \zeta, \eta, \text{RF}$) are indexed by (vehicle type, pollutant, gradient bin, load bin). Bundled defaults cover standard COPERT V vehicle categories; user can override per cell. Speed $V$ is the VDF-adjusted `velocity_kmh` from the loaded network — evaluated continuously, no bucketing.
 
-### Non-exhaust emissions (EEA EMEP)
+Gradient and load are interpolated between their discrete bins. Links with $|\text{grade}| > 6\%$ were excluded at the network level (COPERT V validity range).
 
-Flat g/km per (vehicle type, pollutant). PM only — tyre wear, brake wear, road surface abrasion.
+This is the same methodology as Dias & Jenelius (2026), with the improvement that $V$ is link- and period-specific from BPR rather than a flat scenario speed.
+
+### Non-exhaust — flat factors
+
+`emission_factors.csv` — (vehicle type, pollutant) → flat g/km. Covers tyre wear, brake wear, road surface abrasion. PM only. Bundled EEA EMEP defaults, user-overridable.
 
 ### Emission per (link, period, vehicle type, pollutant)
 
-$$\text{emission\_g} = n_{\text{trips}} \cdot \frac{d_\ell}{1000} \cdot \text{EF}(V, s_\ell, \text{load\_pct})$$
+$$\text{emission\_g} = n_{\text{trips}} \cdot \frac{d_\ell}{1000} \cdot \text{EF}(V_\ell, s_\ell, \text{load\_pct})$$
 
-Load pct derivation: TBD.
+### Output
+
+`emissions.gpkg` — spatially explicit emission inventory per link per period. Serves directly as a hotspot map and as source-term input for atmospheric dispersion modelling (AERMOD, CALPUFF) if concentration plumes are needed downstream.
 
 ---
 
 ## Open / TBD
 
-- **Agent formation**: exact combination criterion — same link vs. buffer radius; what "same link" means when atoms are at different positions along the link
-- **Atom count**: max resource vs. weighted average across resources per stratum
-- **Stratum correlation**: same uniform draw for supply and demand stratum assignment vs. independent draws
+- **Vehicle × road type velocity**: config (one speed per road type) or separate file (speed per vehicle type × road type)
 - **Consolidation location**: centroid of grouped agents vs. largest agent's node
-- **Load pct**: derive from actual simulated loads vs. global config parameter
 - **KPIs**: not yet specified

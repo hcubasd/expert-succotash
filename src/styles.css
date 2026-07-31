@@ -1,0 +1,52 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+  font-family: system-ui, sans-serif;
+  font-size: 13px;
+}
+
+.bg {
+  display: flex;
+  gap: 1px;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The fg must size to its TEXT, not to its bg. squeezeFg brackets the font by
+   comparing the two bounding rects, so the fg has to actually overflow the bg
+   at large fonts for the fit state to flip. That means: no flex:1, no
+   min-width/min-height:0, and no overflow:hidden (which would silently resolve
+   min-width:auto to 0). Auto margins center it without letting it stretch. */
+.fg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: auto;
+  white-space: nowrap;
+}
+
+.overlay-btn {
+  position: fixed;
+  border: none;
+  cursor: pointer;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  background: rgba(128, 128, 128, 0.75);
+  color: inherit;
+  border-radius: 3px;
+  user-select: none;
+}
+
+.overlay-btn:hover {
+  background: rgba(128, 128, 128, 0.95);
+}

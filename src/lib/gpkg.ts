@@ -37,12 +37,15 @@ export async function readGpkg(buffer: ArrayBuffer): Promise<GpkgTable[]> {
       if (!res[0]) { tables.push({ name, rows: [], geometries: null }); continue; }
       const cols = res[0].columns;
       const geomColIdx = cols.findIndex(c => c.toLowerCase() === 'geom' || c.toLowerCase() === 'geometry');
+      // fid is GeoPackage's auto-assigned row id, not real data -- excluded
+      // the same way geom is, at the parse boundary, not just hidden from view.
+      const fidColIdx = cols.findIndex(c => c.toLowerCase() === 'fid');
       const rows: Record<string, unknown>[] = [];
       const geometries: ParsedGeometry[] = [];
       for (const rawRow of res[0].values) {
         const row: Record<string, unknown> = {};
         for (let i = 0; i < cols.length; i++) {
-          if (i === geomColIdx) continue;
+          if (i === geomColIdx || i === fidColIdx) continue;
           row[cols[i]] = rawRow[i];
         }
         rows.push(row);

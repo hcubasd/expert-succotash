@@ -16,12 +16,20 @@ export type LoadedFile = {
 };
 
 export const NODE_TO_FILE: Record<string, string> = {
+  supply_effects: 'supply_effects.csv',
   supply_thresholds: 'supply_thresholds.csv',
-  supply_slopes: 'supply_slopes.csv',
+  demand_effects: 'demand_effects.csv',
   demand_thresholds: 'demand_thresholds.csv',
-  demand_slopes: 'demand_slopes.csv',
-  batch_sizes: 'batch_sizes.csv',
+  capacity_effects: 'capacity_effects.csv',
+  capacity_thresholds: 'capacity_thresholds.csv',
+  need_effects: 'need_effects.csv',
+  need_thresholds: 'need_thresholds.csv',
   zones: 'zones.gpkg',
+  supply: 'supply.csv',
+  demand: 'demand.csv',
+  capacities: 'capacities.csv',
+  needs: 'needs.csv',
+  agents: 'agents.gpkg',
   departures: 'departures.csv',
   time_intervals: 'time_intervals.csv',
   dwell_times: 'dwell_times.csv',
@@ -33,9 +41,6 @@ export const NODE_TO_FILE: Record<string, string> = {
   network: 'network.gpkg',
   copert_v_coefficients: 'copert_v_coefficients.csv',
   emission_factors: 'emission_factors.csv',
-  supply: 'supply.csv',
-  demand: 'demand.csv',
-  agents: 'agents.gpkg',
   desire_lines: 'desire_lines.gpkg',
   network_loads: 'network_loads.csv',
   network_emissions: 'network_emissions.csv',
@@ -45,7 +50,7 @@ export const FILE_TO_NODE: Record<string, string> = Object.fromEntries(
   Object.entries(NODE_TO_FILE).map(([k, v]) => [v, k])
 );
 
-function classifyColumns(
+export function classifyColumns(
   filename: string,
   rows: Record<string, unknown>[],
 ): { strata: string[]; values: string[] } {
@@ -55,18 +60,45 @@ function classifyColumns(
   const base = filename.replace(/\.(csv|gpkg)$/, '');
 
   switch (base) {
-    case 'supply':
-    case 'demand':
-    case 'agents':
-      return { strata: headers.filter(h => !isNumeric(h)), values: headers.filter(h => isNumeric(h)) };
+    // Wide: stratum/stratum_value name-value pairs, then one column per
+    // resource. Both stratum columns are always strata regardless of dtype
+    // (stratum_value mixes int zone_id rows with string rows for every other
+    // dimension); everything else is a resource, always numeric.
+    case 'supply_effects':
+    case 'demand_effects':
+    case 'capacity_effects':
+    case 'need_effects':
+      return {
+        strata: headers.filter(h => h === 'stratum' || h === 'stratum_value'),
+        values: headers.filter(h => h !== 'stratum' && h !== 'stratum_value'),
+      };
+    // resource_level is numeric but plays stratum_value's shape-defining role
+    // (see urban-dollop's README), so it's strata like resource, not a value.
     case 'supply_thresholds':
     case 'demand_thresholds':
+    case 'capacity_thresholds':
+    case 'need_thresholds':
       return { strata: headers.filter(h => h === 'resource' || h === 'resource_level'), values: ['threshold'] };
-    case 'supply_slopes':
-    case 'demand_slopes':
-      return { strata: headers.filter(h => h !== 'slope'), values: ['slope'] };
-    case 'batch_sizes':
-      return { strata: ['resource', 'batch_size'], values: ['probability'] };
+    // Wide on stratum dimensions, then one column per resource (always int,
+    // rounded expected value). zone_id is always strata even though it's
+    // numeric; any other all-string column is a dimension too.
+    case 'supply':
+    case 'demand':
+      return {
+        strata: headers.filter(h => h === 'zone_id' || !isNumeric(h)),
+        values: headers.filter(h => h !== 'zone_id' && isNumeric(h)),
+      };
+    // Wide on dimensions, long on resource: resource/resource_level are
+    // shape-defining like above, probability is the only real value column.
+    case 'capacities':
+    case 'needs':
+      return { strata: headers.filter(h => h !== 'probability'), values: ['probability'] };
+    // agent_id, zone_id + dimensions, {resource}_capacity/{resource}_need.
+    case 'agents':
+      return {
+        strata: headers.filter(h => h === 'zone_id' || !isNumeric(h)),
+        values: headers.filter(h => h !== 'zone_id' && isNumeric(h)),
+      };
     case 'desire_lines':
       return { strata: [], values: headers.filter(h => isNumeric(h)) };
     case 'departures':

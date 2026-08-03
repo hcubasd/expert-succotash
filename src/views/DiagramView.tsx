@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { colorBg, squeezeFg } from 'psychic-potato';
-import { rgbStr } from '../lib/colors';
+import { grayAt, rgbStr } from '../lib/colors';
 import type { RgbColor } from '../lib/colors';
 import { EDGES, NODES } from '../diagram/layout';
 import { FILE_TO_NODE, NODE_TO_FILE, parseFile } from '../lib/fileConfig';
@@ -19,8 +19,17 @@ type Props = {
 type Edge = { d: string; x1: number; x2: number; from: string; to: string };
 
 // Spacer: a plain flex:1 div that absorbs slack. Deliberately not a .bg — only
-// the cards are bg/fg pairs, so squeezeFg sees exactly the 23 cards.
+// the cards are bg/fg pairs, so squeezeFg sees exactly the 27 cards.
 const Spacer = () => <div style={{ flex: 1 }} />;
+
+// Nodes past agents (desire-lines onward) aren't wired up in urban-dollop
+// yet, so they're shown for context but can't be clicked or dropped onto.
+const MAX_INTERACTIVE_COL = 2;
+
+// Cards are the only colorBg'd layer now (see the root div below), so their
+// lightness has to carry its own contrast against the page instead of
+// sitting between an outer ramp and an inner extreme.
+const CARD_LIGHTNESS = { dark: 0.75, light: 0.25 };
 
 export default function DiagramView({
   dark,
@@ -49,9 +58,15 @@ export default function DiagramView({
       .map(([, list]) => list.sort((a, b) => a.order - b.order));
   }, []);
 
-  // An unloaded card keeps whatever colorBg gave it: white in light mode,
-  // black in dark. Edges fade to that same colour at an unloaded end.
-  const blank = dark ? '#000' : '#fff';
+  const nodeById = useMemo(() => new Map(NODES.map(n => [n.id, n])), []);
+  const isInteractive = useCallback(
+    (nodeId: string) => (nodeById.get(nodeId)?.col ?? Infinity) <= MAX_INTERACTIVE_COL,
+    [nodeById],
+  );
+
+  // An unloaded card keeps whatever colorBg gave it. Edges fade to that same
+  // colour at an unloaded end.
+  const blank = rgbStr(grayAt(dark ? CARD_LIGHTNESS.dark : CARD_LIGHTNESS.light));
   const colorOf = useCallback(
     (nodeId: string) => {
       const c = nodeColors.get(nodeId);
@@ -69,7 +84,10 @@ export default function DiagramView({
         // black text on every coloured background, app-wide
         if (fg) fg.style.color = '#000';
       } else if (fg) {
-        fg.style.color = dark ? '#fff' : '#000';
+        // Unloaded cards sit at CARD_LIGHTNESS (light gray in dark mode, dark
+        // gray in light mode), so the readable text colour is the opposite
+        // of what it'd be if the card were the true page black/white.
+        fg.style.color = dark ? '#000' : '#fff';
       }
     });
   }, [nodeColors, dark]);
@@ -108,7 +126,10 @@ export default function DiagramView({
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    colorBg(container, { from: 0.75, to: dark ? 0 : 1 });
+    // The root isn't a .bg anymore (see below), so this only finds the card
+    // divs -- a single depth level, which colorBg paints at `from` alone.
+    const cardLightness = dark ? CARD_LIGHTNESS.dark : CARD_LIGHTNESS.light;
+    colorBg(container, { from: cardLightness, to: cardLightness });
     squeezeFg(container);
     measureEdges();
   }, [dark, measureEdges]);
@@ -160,6 +181,7 @@ export default function DiagramView({
   }
 
   function handleClick(nodeId: string) {
+    if (!isInteractive(nodeId)) return;
     const name = NODE_TO_FILE[nodeId];
     if (!name) return;
     if (files.has(name)) {
@@ -172,6 +194,7 @@ export default function DiagramView({
 
   function handleDrop(nodeId: string, event: React.DragEvent) {
     event.preventDefault();
+    if (!isInteractive(nodeId)) return;
     const dropped = event.dataTransfer.files[0];
     const name = NODE_TO_FILE[nodeId];
     if (dropped && name) readInto(dropped, name);
@@ -180,8 +203,15 @@ export default function DiagramView({
   return (
     <div
       ref={containerRef}
-      className="bg"
-      style={{ flexDirection: 'row', width: '100vw', height: '100vh', position: 'relative' }}
+      style={{
+        display: 'flex',
+        flexDirection: 'row',
+        gap: 1,
+        width: '100vw',
+        height: '100vh',
+        position: 'relative',
+        backgroundColor: dark ? '#000' : '#fff',
+      }}
       onDragOver={e => e.preventDefault()}
     >
       <input
@@ -246,6 +276,7 @@ export default function DiagramView({
             {colNodes.map((node, ni) => {
               const name = NODE_TO_FILE[node.id];
               const busy = name ? loading.has(name) : false;
+              const interactive = isInteractive(node.id);
 
               return (
                 <Fragment key={node.id}>
@@ -260,14 +291,14 @@ export default function DiagramView({
                       className="bg"
                       style={{
                         flex: 1,
-                        cursor: 'pointer',
+                        cursor: interactive ? 'pointer' : 'default',
                         opacity: busy ? 0.5 : 1,
                         position: 'relative',
                         zIndex: 1,
                       }}
-                      onClick={() => handleClick(node.id)}
-                      onDragOver={e => e.preventDefault()}
-                      onDrop={e => handleDrop(node.id, e)}
+                      onClick={interactive ? () => handleClick(node.id) : undefined}
+                      onDragOver={interactive ? e => e.preventDefault() : undefined}
+                      onDrop={interactive ? e => handleDrop(node.id, e) : undefined}
                     >
                       <div className="fg">{busy ? '…' : node.label}</div>
                     </div>

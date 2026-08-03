@@ -1,4 +1,4 @@
-import { matchColors } from 'miniature-waffle';
+import { matchColors, matchGrays } from 'miniature-waffle';
 export type { RgbColor } from 'miniature-waffle';
 import type { RgbColor } from 'miniature-waffle';
 
@@ -38,4 +38,13 @@ export function gradientAt(t: number, gradient: RgbColor[]): RgbColor {
   const clamped = Math.max(0, Math.min(1, t));
   const idx = Math.min(gradient.length - 1, Math.floor(clamped * (gradient.length - 1)));
   return gradient[idx];
+}
+
+// A plain neutral gray at a given lightness, [0,1] where 0 = black, 1 = white.
+// Used wherever something needs to match colorBg's output without itself
+// being a .bg div walked by colorBg (e.g. an edge endpoint that fades to the
+// same color as an unloaded card).
+export function grayAt(lightness: number): RgbColor {
+  const l = Math.max(0, Math.min(1, lightness)) * 100;
+  return matchGrays(1, l, l)[0];
 }

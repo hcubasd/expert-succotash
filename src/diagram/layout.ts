@@ -12,14 +12,14 @@ export type DiagramEdge = { from: string; to: string };
 //   col 1: supply, demand, zones, capacities, needs (zones centered)
 //   col 2: agents
 //   col 3: desire_lines … vehicles  (9 nodes — tallest column)
-//   col 4: network_loads, copert_v_coefficients, emission_factors
+//   col 4: copert_v_coefficients, network_loads, emission_factors
+//          (network_loads centered -- it's the one with the most edges,
+//          both incoming from col 3 and outgoing to col 5)
 //   col 5: network_emissions
 //
-// Only col 0-2 (zones through agents) are interactive in the view layer —
-// everything past agents is shown for context but isn't wired up in
-// urban-dollop yet, so DiagramView disables click/drop past col 2.
-// batch_sizes is gone for good (confirmed dropped from urban-dollop);
-// everything else past agents is still undecided, so it's left as-is.
+// Every node is interactive: the full DAG through network_emissions is
+// wired up in urban-dollop now. batch_sizes is gone for good (confirmed
+// dropped from urban-dollop).
 
 export const NODES: DiagramNode[] = [
   // col 0
@@ -50,9 +50,9 @@ export const NODES: DiagramNode[] = [
   { id: 'alternative_specific_constants', label: 'alt-specific-consts',       col: 3, order: 7 },
   { id: 'network',                        label: 'network',                   col: 3, order: 8 },
   { id: 'vehicles',                       label: 'vehicles',                  col: 3, order: 9 },
-  // col 4
-  { id: 'network_loads',                  label: 'network-loads',             col: 4, order: 0 },
-  { id: 'copert_v_coefficients',          label: 'copert-v-coefficients',     col: 4, order: 1 },
+  // col 4 — network_loads centered
+  { id: 'copert_v_coefficients',          label: 'copert-v-coefficients',     col: 4, order: 0 },
+  { id: 'network_loads',                  label: 'network-loads',             col: 4, order: 1 },
   { id: 'emission_factors',              label: 'emission-factors',           col: 4, order: 2 },
   // col 5
   { id: 'network_emissions',              label: 'network-emissions',         col: 5, order: 0 },

@@ -5,9 +5,8 @@ import TableView from './views/TableView';
 import { NODES } from './diagram/layout';
 import { FILE_TO_NODE } from './lib/fileConfig';
 import type { LoadedFile } from './lib/fileConfig';
-import { ngon, randomRotation, rgbStr } from './lib/colors';
+import { DEFAULT_LUMINANCE, ngon, pickNodeColor, randomRotation } from './lib/colors';
 import type { RgbColor } from './lib/colors';
-import { buildSelection } from './lib/selection';
 import type { Selection } from './lib/selection';
 
 type View =
@@ -23,12 +22,17 @@ export default function App() {
   // Nothing is lit anywhere until the user clicks a column header.
   const [selection, setSelection] = useState<Selection | null>(null);
 
+  // The one shared luminance every matchColors call in the app draws at --
+  // a single knob, not per-column. Fixed at the default for now; wired as
+  // state so a control can turn it live later without touching callers.
+  const [luminance] = useState(DEFAULT_LUMINANCE);
+
   // The diagram's palette is one rotation of the N-gon, fixed for the session.
   // Colours are handed out as files arrive, not up front, so the set of used
   // hues always matches the set of loaded files.
   const [nodeRotation] = useState(randomRotation);
   const [nodeColors, setNodeColors] = useState<Map<string, RgbColor>>(new Map());
-  const palette = useMemo(() => ngon(NODES.length, nodeRotation), [nodeRotation]);
+  const palette = useMemo(() => ngon(NODES.length, nodeRotation, luminance), [nodeRotation, luminance]);
 
   const loadFile = useCallback((filename: string, file: LoadedFile) => {
     setFiles(prev => new Map(prev).set(filename, file));
@@ -37,11 +41,8 @@ export default function App() {
     if (!nodeId) return;
     setNodeColors(prev => {
       if (prev.has(nodeId)) return prev;
-      const used = new Set([...prev.values()].map(rgbStr));
-      const free = palette.filter(c => !used.has(rgbStr(c)));
-      if (free.length === 0) return prev;
-      const pick = free[Math.floor(Math.random() * free.length)];
-      return new Map(prev).set(nodeId, pick);
+      const pick = pickNodeColor(palette, prev.values());
+      return pick ? new Map(prev).set(nodeId, pick) : prev;
     });
   }, [palette]);
 
@@ -51,11 +52,11 @@ export default function App() {
 
   // Clicking a column lights it and extinguishes whatever was lit before,
   // in this table or any other. Clicking the lit column clears the selection.
-  const toggleColumn = useCallback((file: LoadedFile, column: string) => {
+  const toggleColumn = useCallback((filename: string, column: string) => {
     setSelection(prev =>
-      prev && prev.filename === file.filename && prev.column === column
+      prev && prev.filename === filename && prev.column === column
         ? null
-        : buildSelection(file, column)
+        : { filename, column }
     );
   }, []);
 
@@ -100,9 +101,10 @@ export default function App() {
       dark={dark}
       file={file}
       selection={selection}
+      luminance={luminance}
       onBack={() => setView({ kind: 'diagram' })}
       onUpdate={updated => updateFile(view.filename, updated)}
-      onToggleColumn={column => toggleColumn(file, column)}
+      onToggleColumn={column => toggleColumn(view.filename, column)}
     />
   );
 }

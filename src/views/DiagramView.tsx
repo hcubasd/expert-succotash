@@ -22,10 +22,6 @@ type Edge = { d: string; x1: number; x2: number; from: string; to: string };
 // the cards are bg/fg pairs, so squeezeFg sees exactly the 27 cards.
 const Spacer = () => <div style={{ flex: 1 }} />;
 
-// Nodes past agents (desire-lines onward) aren't wired up in urban-dollop
-// yet, so they're shown for context but can't be clicked or dropped onto.
-const MAX_INTERACTIVE_COL = 2;
-
 // Cards are the only colorBg'd layer now (see the root div below), so their
 // lightness has to carry its own contrast against the page instead of
 // sitting between an outer ramp and an inner extreme.
@@ -57,12 +53,6 @@ export default function DiagramView({
       .sort(([a], [b]) => a - b)
       .map(([, list]) => list.sort((a, b) => a.order - b.order));
   }, []);
-
-  const nodeById = useMemo(() => new Map(NODES.map(n => [n.id, n])), []);
-  const isInteractive = useCallback(
-    (nodeId: string) => (nodeById.get(nodeId)?.col ?? Infinity) <= MAX_INTERACTIVE_COL,
-    [nodeById],
-  );
 
   // An unloaded card keeps whatever colorBg gave it. Edges fade to that same
   // colour at an unloaded end.
@@ -181,7 +171,6 @@ export default function DiagramView({
   }
 
   function handleClick(nodeId: string) {
-    if (!isInteractive(nodeId)) return;
     const name = NODE_TO_FILE[nodeId];
     if (!name) return;
     if (files.has(name)) {
@@ -194,7 +183,6 @@ export default function DiagramView({
 
   function handleDrop(nodeId: string, event: React.DragEvent) {
     event.preventDefault();
-    if (!isInteractive(nodeId)) return;
     const dropped = event.dataTransfer.files[0];
     const name = NODE_TO_FILE[nodeId];
     if (dropped && name) readInto(dropped, name);
@@ -276,7 +264,6 @@ export default function DiagramView({
             {colNodes.map((node, ni) => {
               const name = NODE_TO_FILE[node.id];
               const busy = name ? loading.has(name) : false;
-              const interactive = isInteractive(node.id);
 
               return (
                 <Fragment key={node.id}>
@@ -291,14 +278,16 @@ export default function DiagramView({
                       className="bg"
                       style={{
                         flex: 1,
-                        cursor: interactive ? 'pointer' : 'default',
+                        cursor: 'pointer',
                         opacity: busy ? 0.5 : 1,
                         position: 'relative',
                         zIndex: 1,
+                        paddingTop: '1em',
+                        paddingBottom: '1em',
                       }}
-                      onClick={interactive ? () => handleClick(node.id) : undefined}
-                      onDragOver={interactive ? e => e.preventDefault() : undefined}
-                      onDrop={interactive ? e => handleDrop(node.id, e) : undefined}
+                      onClick={() => handleClick(node.id)}
+                      onDragOver={e => e.preventDefault()}
+                      onDrop={e => handleDrop(node.id, e)}
                     >
                       <div className="fg">{busy ? '…' : node.label}</div>
                     </div>

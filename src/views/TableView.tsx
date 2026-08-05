@@ -1,22 +1,30 @@
 import { useEffect, useRef } from 'react';
 import { colorBg, squeezeFg } from 'psychic-potato';
-import { cellColor, uniqueOrdered } from '../lib/selection';
+import { cellColor } from '../lib/selection';
 import type { Selection } from '../lib/selection';
+import { uniqueOrdered } from '../lib/colors';
 import type { LoadedFile } from '../lib/fileConfig';
 
 type Props = {
   dark: boolean;
   file: LoadedFile;
   selection: Selection | null;
+  luminance: number;
   onBack: () => void;
   onUpdate: (file: LoadedFile) => void;
   onToggleColumn: (column: string) => void;
 };
 
 // Rows never shrink — a short window scrolls instead of squashing every cell.
-// There is no padding anywhere (see the * reset); this is the only thing
-// standing between the text and the cell edge, so keep it near the line box.
+// Cell now carries real 1em padding (see below), which is what stands between
+// the text and the cell edge; this is just a floor under that, so a cell with
+// no content still holds a sane minimum row height.
 const ROW_H = 20;
+
+// No leaf column shrinks narrower than this — past this point the table
+// stops squeezing font size to fit and switches to a fixed-width layout with
+// horizontal scroll instead (see the wrapping div in the root render).
+const MIN_COL_WIDTH = 72;
 
 // A cell that carries a selection colour stashes it here at render time.
 // colorBg() overwrites every .bg background, so the colour can only be applied
@@ -33,7 +41,7 @@ function Cell({ fill, flex, onClick, children }: CellProps) {
     <div
       className="bg"
       data-fill={fill}
-      style={{ flex, cursor: onClick ? 'pointer' : undefined }}
+      style={{ flex, cursor: onClick ? 'pointer' : undefined, paddingTop: '1em', paddingBottom: '1em' }}
       onClick={onClick}
     >
       {/* black text on a coloured background, inherited otherwise */}
@@ -76,8 +84,9 @@ function renderBody(
   rows: Record<string, unknown>[],
   strata: string[],
   values: string[],
-  filename: string,
+  file: LoadedFile,
   selection: Selection | null,
+  luminance: number,
 ): React.ReactNode {
   // Leaf: every row in this group, one line each. Strata do not necessarily
   // key the table uniquely, so a group can hold more than one record.
@@ -94,7 +103,7 @@ function renderBody(
             {values.map(v => {
               const raw = row[v];
               return (
-                <Cell key={v} flex={1} fill={cellColor(selection, filename, v, raw)}>
+                <Cell key={v} flex={1} fill={cellColor(selection, file, v, raw, luminance)}>
                   {raw == null ? '' : String(raw)}
                 </Cell>
               );
@@ -116,9 +125,9 @@ function renderBody(
         const groupRows = rows.filter(r => String(r[s] ?? '') === val);
         return (
           <div key={val} className="bg" style={{ flexDirection: 'row', flexShrink: 0 }}>
-            <Cell flex={1} fill={cellColor(selection, filename, s, val)}>{val}</Cell>
+            <Cell flex={1} fill={cellColor(selection, file, s, val, luminance)}>{val}</Cell>
             <div className="bg" style={{ flexDirection: 'column', flex: remaining - 1 }}>
-              {renderBody(groupRows, rest, values, filename, selection)}
+              {renderBody(groupRows, rest, values, file, selection, luminance)}
             </div>
           </div>
         );
@@ -127,13 +136,14 @@ function renderBody(
   );
 }
 
-export default function TableView({ dark, file, selection, onBack, onUpdate, onToggleColumn }: Props) {
+export default function TableView({ dark, file, selection, luminance, onBack, onUpdate, onToggleColumn }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
 
   const visibleCols = file.colOrder.filter(c => !file.hiddenCols.has(c));
   const visibleStrata = visibleCols.filter(c => file.strata.includes(c));
   const visibleValues = visibleCols.filter(c => file.values.includes(c));
+  const minTableWidth = (visibleStrata.length + visibleValues.length) * MIN_COL_WIDTH;
 
   // The lit column, only if it belongs to this table.
   const activeCol = selection?.filename === file.filename ? selection.column : null;
@@ -161,7 +171,7 @@ export default function TableView({ dark, file, selection, onBack, onUpdate, onT
     root.querySelectorAll<HTMLElement>('div.fg').forEach(el => {
       el.style.fontSize = `${target}px`;
     });
-  }, [dark, selection, visibleCols.join(','), file.rows.length, file.filename]);
+  }, [dark, selection, luminance, visibleCols.join(','), file.rows.length, file.filename]);
 
   function moveLeft() {
     if (!activeCol) return;
@@ -206,17 +216,30 @@ export default function TableView({ dark, file, selection, onBack, onUpdate, onT
         color: dark ? '#fff' : '#000',
       }}
     >
-      <div ref={headerRef} className="bg" style={{ flexDirection: 'column', flexShrink: 0 }}>
-        {renderHeader(visibleStrata, visibleValues, onToggleColumn)}
-      </div>
+      {/*
+        Horizontal scroll lives here, once, shared by header and body --
+        deliberately not a .bg (see psychic-potato: non-bg divs don't count
+        toward colorBg's depth, so this doesn't shift either child's ramp
+        level). Below MIN_COL_WIDTH * column count it's a no-op: minWidth
+        only stops columns shrinking further, flex still stretches them to
+        fill a wider viewport. Past that point the content outgrows this
+        wrapper and overflowX:auto starts scrolling it, header and body
+        together, with no scroll-position syncing needed since they're both
+        just children of this one scrolling box.
+      */}
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflowX: 'auto' }}>
+        <div ref={headerRef} className="bg" style={{ flexDirection: 'column', flexShrink: 0, minWidth: minTableWidth }}>
+          {renderHeader(visibleStrata, visibleValues, onToggleColumn)}
+        </div>
 
-      <div
-        className="bg"
-        style={{ flex: 1, flexDirection: 'column', overflowY: 'auto', overflowX: 'hidden' }}
-      >
-        {file.rows.length === 0
-          ? <div style={{ padding: 16, opacity: 0.5 }}>no rows</div>
-          : renderBody(file.rows, visibleStrata, visibleValues, file.filename, selection)}
+        <div
+          className="bg"
+          style={{ flex: 1, flexDirection: 'column', overflowY: 'auto', minWidth: minTableWidth }}
+        >
+          {file.rows.length === 0
+            ? <div style={{ padding: 16, opacity: 0.5 }}>no rows</div>
+            : renderBody(file.rows, visibleStrata, visibleValues, file, selection, luminance)}
+        </div>
       </div>
 
       <div style={{ position: 'fixed', bottom: 12, left: 12, display: 'flex', gap: 4 }}>

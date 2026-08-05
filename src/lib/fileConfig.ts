@@ -1,9 +1,25 @@
 import { parseCsv } from './csv';
 import { readGpkg } from './gpkg';
 import type { ParsedGeometry } from './gpkg';
+import { randomRotation, uniqueOrdered } from './colors';
 
-// A loaded table holds data and view state only. Colour lives in the app-wide
-// Selection (see lib/selection.ts) because only one column anywhere is ever lit.
+// The inputs to a column's palette, decided once when the file loads and
+// held for its lifetime -- not the realized colors themselves (nothing here
+// stores a Map<value, RgbColor> or a color array; those are cheap to
+// recompute on demand from rows + recipe, and storing them would mean
+// keeping every table's full palette in memory whether or not it's ever
+// looked at). A stratum's `n` is its distinct-value count at load time;
+// re-selecting the same column later always reproduces the same colors,
+// rather than reshuffling on every click.
+export type ColorRecipe =
+  | { kind: 'stratum'; n: number; rotation: number }
+  | { kind: 'value'; rotation: number };
+
+// A loaded table holds data and view state only. Which column is lit lives in
+// the app-wide Selection (see lib/selection.ts), since only one column
+// anywhere is ever lit; the palette recipe for painting it lives here, on the
+// file, so it's available to any view holding the file -- the map included,
+// even before anything there reads it.
 // `hiddenCols` hides from view, never from memory — rows are untouched.
 export type LoadedFile = {
   filename: string;
@@ -13,7 +29,24 @@ export type LoadedFile = {
   values: string[];
   colOrder: string[];
   hiddenCols: Set<string>;
+  colorRecipes: Map<string, ColorRecipe>;
 };
+
+function buildColorRecipes(
+  rows: Record<string, unknown>[],
+  strata: string[],
+  values: string[],
+): Map<string, ColorRecipe> {
+  const recipes = new Map<string, ColorRecipe>();
+  for (const col of strata) {
+    const n = uniqueOrdered(rows.map(r => String(r[col] ?? ''))).length;
+    recipes.set(col, { kind: 'stratum', n, rotation: randomRotation() });
+  }
+  for (const col of values) {
+    recipes.set(col, { kind: 'value', rotation: randomRotation() });
+  }
+  return recipes;
+}
 
 export const NODE_TO_FILE: Record<string, string> = {
   supply_effects: 'supply_effects.csv',
@@ -99,8 +132,17 @@ export function classifyColumns(
         strata: headers.filter(h => h === 'zone_id' || !isNumeric(h)),
         values: headers.filter(h => h !== 'zone_id' && isNumeric(h)),
       };
+    // resource is a category; quantity is the one measured continuum.
+    // origin_agent_id/destination_zone_id are identifiers, not quantities --
+    // an id's magnitude carries no meaning, so both are strata like every
+    // other identifier column in this app (link_id, zone_id, resource_level),
+    // regardless of what any other file happens to do with a similarly-named
+    // column.
     case 'desire_lines':
-      return { strata: [], values: headers.filter(h => isNumeric(h)) };
+      return {
+        strata: ['resource', 'origin_agent_id', 'destination_zone_id'],
+        values: ['quantity'],
+      };
     case 'departures':
       return { strata: ['resource', 'time_interval'], values: ['probability'] };
     case 'time_intervals':
@@ -116,19 +158,26 @@ export function classifyColumns(
     case 'road_capacities':
       return { strata: ['road_type'], values: ['capacity'] };
     case 'alternative_specific_constants':
-      return { strata: ['vehicle', 'resource'], values: ['alpha'] };
+      return { strata: ['vehicle', 'resource'], values: ['alternative_specific_constant'] };
     case 'zones':
       return { strata: ['zone_id'], values: [] };
+    // link_id is an identifier, not a measurement, so it's strata like every
+    // other id column -- oneway is a 2-value category (boolean); grade is
+    // the one real physical measurement here.
     case 'network':
-      return { strata: ['road_type', 'direction'], values: headers.filter(h => !['road_type', 'direction'].includes(h) && isNumeric(h)) };
+      return { strata: ['link_id', 'road_type', 'oneway'], values: ['grade'] };
+    // forward is a 2-value category (which direction); vehicle_count,
+    // velocity, and load_pct are all genuine measured quantities.
     case 'network_loads':
-      return { strata: ['link_id', 'time_interval', 'vehicle'], values: ['count', 'velocity', 'load_pct'] };
+      return { strata: ['link_id', 'time_interval', 'vehicle', 'forward'], values: ['vehicle_count', 'velocity', 'load_pct'] };
     case 'copert_v_coefficients':
       return { strata: ['vehicle_type', 'pollutant', 'gradient_bin', 'payload_bin'], values: headers.filter(h => !['vehicle_type', 'pollutant', 'gradient_bin', 'payload_bin'].includes(h)) };
     case 'emission_factors':
-      return { strata: ['vehicle_type', 'pollutant'], values: ['ef'] };
+      return { strata: ['vehicle_type', 'pollutant'], values: ['emission_factor'] };
+    // source (exhaust/non-exhaust) is a 2-value category, same status as
+    // forward -- grams is the one measured quantity.
     case 'network_emissions':
-      return { strata: ['link_id', 'time_interval', 'vehicle', 'pollutant'], values: ['grams'] };
+      return { strata: ['link_id', 'time_interval', 'vehicle', 'forward', 'pollutant', 'source'], values: ['grams'] };
     default:
       return { strata: headers.filter(h => !isNumeric(h)), values: headers.filter(h => isNumeric(h)) };
   }
@@ -163,5 +212,6 @@ export async function parseFile(file: File): Promise<LoadedFile> {
     values,
     colOrder,
     hiddenCols: new Set(),
+    colorRecipes: buildColorRecipes(rows, strata, values),
   };
 }

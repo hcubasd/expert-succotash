@@ -18,7 +18,9 @@
 		"vitest": "^4.1.10"
 	},
 	"dependencies": {
+		"@types/earcut": "^3.0.0",
 		"@types/sql.js": "^1.4.11",
+		"earcut": "^3.2.3",
 		"miniature-waffle": "^0.1.7",
 		"psychic-potato": "^0.2.0",
 		"react": "^19.2.8",

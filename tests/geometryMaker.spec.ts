@@ -1,0 +1,138 @@
+import { describe, expect, it } from 'vitest';
+import {
+  ZERO_ORIGIN, boundsOf, makePoints, makePolygons, makeSegments, originOf, rawBounds,
+} from '../src/lib/geometryMaker';
+import type { RawGeometry } from '../src/lib/rawTable';
+
+const point = (x: number, y: number): RawGeometry => ({ type: 'Point', coordinates: [x, y] });
+const line = (coords: [number, number][]): RawGeometry => ({ type: 'LineString', coordinates: coords });
+const square = (): RawGeometry => ({
+  type: 'Polygon',
+  coordinates: [[[0, 0], [1, 0], [1, 1], [0, 1]]],
+});
+
+describe('makeSegments', () => {
+  it('flattens a two-point line into one segment', () => {
+    const g = makeSegments([line([[0, 0], [1, 1]])], ZERO_ORIGIN);
+    expect(Array.from(g.positions)).toEqual([0, 0, 1, 1]);
+    expect(Array.from(g.rowIndex)).toEqual([0, 0]);
+  });
+
+  it('decomposes a polyline into one segment per span, all tagged to its row', () => {
+    const g = makeSegments([line([[0, 0], [1, 0], [2, 0]])], ZERO_ORIGIN);
+    // two segments, four vertices, every one belonging to row 0
+    expect(g.positions.length / 2).toBe(4);
+    expect(Array.from(g.rowIndex)).toEqual([0, 0, 0, 0]);
+  });
+
+  it('allocates a color and a hue slot per vertex', () => {
+    const g = makeSegments([line([[0, 0], [1, 1]])], ZERO_ORIGIN);
+    expect(g.colors.length).toBe(6);
+    expect(g.hues.length).toBe(2);
+  });
+
+  it('keeps row indices distinct across several lines', () => {
+    const g = makeSegments([line([[0, 0], [1, 1]]), line([[2, 2], [3, 3]])], ZERO_ORIGIN);
+    expect(Array.from(g.rowIndex)).toEqual([0, 0, 1, 1]);
+  });
+});
+
+describe('makePolygons', () => {
+  it('triangulates a square into two triangles', () => {
+    const g = makePolygons([square()], ZERO_ORIGIN);
+    expect(g.fillPositions.length / 2).toBe(6);
+    expect(Array.from(g.fillRowIndex)).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+
+  it('closes the ring, so a four-sided polygon yields four border segments', () => {
+    const g = makePolygons([square()], ZERO_ORIGIN);
+    expect(g.borderPositions.length / 4).toBe(4);
+  });
+
+  it('ignores anything that is not a polygon', () => {
+    const g = makePolygons([point(0, 0)], ZERO_ORIGIN);
+    expect(g.fillPositions.length).toBe(0);
+    expect(g.borderPositions.length).toBe(0);
+  });
+});
+
+describe('makePoints', () => {
+  it('keeps one vertex per row so a point index is its row index', () => {
+    const g = makePoints([point(1, 2), null, point(3, 4)], ZERO_ORIGIN);
+    expect(g.rowCount).toBe(3);
+    expect(g.positions.length / 2).toBe(3);
+    expect(g.positions[0]).toBe(1);
+    expect(g.positions[4]).toBe(3);
+    // the missing one is non-finite rather than silently shifting the rest
+    expect(Number.isFinite(g.positions[2])).toBe(false);
+  });
+});
+
+describe('boundsOf', () => {
+  it('spans every loaded bucket', () => {
+    const bounds = boundsOf({
+      zones: null,
+      network: makeSegments([line([[0, 0], [4, 1]])], ZERO_ORIGIN),
+      desireLines: null,
+      agents: makePoints([point(-2, 6)], ZERO_ORIGIN),
+    });
+    expect(bounds).toEqual({ minX: -2, minY: 0, maxX: 4, maxY: 6 });
+  });
+
+  it('is null when nothing is loaded', () => {
+    expect(boundsOf({ zones: null, network: null, desireLines: null, agents: null })).toBeNull();
+  });
+
+  it('skips non-finite coordinates rather than poisoning the span', () => {
+    const bounds = boundsOf({
+      zones: null,
+      network: null,
+      desireLines: null,
+      agents: makePoints([point(1, 1), null, point(3, 3)], ZERO_ORIGIN),
+    });
+    expect(bounds).toEqual({ minX: 1, minY: 1, maxX: 3, maxY: 3 });
+  });
+});
+
+describe('real projected coordinates', () => {
+  // A UTM-scale easting/northing pair, 10 cm apart -- two agents on the same
+  // street. Out at 4.6e6 the gap between representable float32 values is about
+  // half a metre, so this separation is well under one step.
+  const A: [number, number] = [500000, 4649776];
+  const B: [number, number] = [500000.1, 4649776.1];
+
+  it('rawBounds keeps full precision, measuring before anything is narrowed', () => {
+    const bounds = rawBounds([point(...A), point(...B)])!;
+    expect(bounds.minY).toBe(4649776);
+    expect(bounds.maxY).toBe(4649776.1);
+  });
+
+  it('collapses two nearby points without an origin, and separates them with one', () => {
+    // Straight into float32 the two land on the same vertex: the detail falls
+    // between representable values and is simply gone.
+    const naive = makePoints([point(...A), point(...B)], ZERO_ORIGIN);
+    expect(naive.positions[3] - naive.positions[1]).toBe(0);
+
+    const origin = originOf(rawBounds([point(...A), point(...B)])!);
+    const offset = makePoints([point(...A), point(...B)], origin);
+    expect(offset.positions[3] - offset.positions[1]).toBeCloseTo(0.1, 6);
+  });
+
+  it('places offset coordinates around zero, where float32 has digits to spare', () => {
+    const geometries = [point(...A), point(...B)];
+    const origin = originOf(rawBounds(geometries)!);
+    const points = makePoints(geometries, origin);
+    for (const value of points.positions) {
+      expect(Math.abs(value)).toBeLessThan(1);
+    }
+  });
+
+  it('keeps separate buckets in one frame when they share an origin', () => {
+    const origin = originOf(rawBounds([point(...A), point(...B)])!);
+    const asPoint = makePoints([point(...A)], origin);
+    const asSegment = makeSegments([line([A, B])], origin);
+    // the same world coordinate lands in the same place either way
+    expect(asSegment.positions[0]).toBeCloseTo(asPoint.positions[0], 6);
+    expect(asSegment.positions[1]).toBeCloseTo(asPoint.positions[1], 6);
+  });
+});

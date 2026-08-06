@@ -21,11 +21,11 @@ body {
   min-height: 0;
 }
 
-/* The fg must size to its TEXT, not to its bg. squeezeFg brackets the font by
-   comparing the two bounding rects, so the fg has to actually overflow the bg
-   at large fonts for the fit state to flip. That means: no flex:1, no
-   min-width/min-height:0, and no overflow:hidden (which would silently resolve
-   min-width:auto to 0). Auto margins center it without letting it stretch. */
+/* The fg sizes to its TEXT, not to its bg: squeezeFg brackets the font by
+   comparing the two bounding rects, so the fg has to actually overflow its bg
+   at large fonts for the fit state to flip. That means no flex:1, no
+   min-width/min-height:0, and no overflow:hidden (which would silently
+   resolve min-width:auto to 0). Auto margins center it without stretching. */
 .fg {
   display: flex;
   align-items: center;
@@ -45,6 +45,7 @@ body {
   color: inherit;
   border-radius: 3px;
   user-select: none;
+  z-index: 2;
 }
 
 .overlay-btn:hover {

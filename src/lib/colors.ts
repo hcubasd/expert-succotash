@@ -2,79 +2,123 @@ import { matchColors, matchGrays } from 'miniature-waffle';
 export type { RgbColor } from 'miniature-waffle';
 import type { RgbColor } from 'miniature-waffle';
 
-// Every matchColors call in the app is drawn at this one shared luminance by
-// default, [0,1], so a stratum swatch and a value-gradient stop are directly
-// comparable. It's a single global knob, not per-column -- callers may pass
-// their own, but there is deliberately only one value in play app-wide.
-export const DEFAULT_LUMINANCE = 0.75;
+// The one luminance every matchColors call in the app draws at, [0,1]. A
+// single global knob, not per-column: a stratum swatch and a value-gradient
+// stop have to be directly comparable, which only holds if they sit on the
+// same circle.
+export const LUMINANCE = 0.75;
 
-// matchColors(n, L) returns all 256 rotations of the n-gon; a palette can
-// never have more than this many entries.
-const ROTATIONS = 256;
+// matchColors places its palette on a circle in CIELAB at fixed L, sampling
+// 256 evenly spaced vertices and returning all 256 rotations of the n-gon
+// inscribed in them. So every color the app can ever show is one of these
+// 256 points, and "hue" is genuinely an angle -- which is what makes the
+// circular-mean blending in the map renderer exact rather than approximate.
+const WHEEL = 256;
 
 export function rgbStr({ r, g, b }: RgbColor) {
   return `rgb(${r},${g},${b})`;
 }
 
 export function randomRotation(): number {
-  return Math.floor(Math.random() * ROTATIONS);
+  return Math.floor(Math.random() * WHEEL);
 }
 
-// First-seen-order distinct values -- the scan order a stratum column's
-// palette indices are assigned in.
-export function uniqueOrdered(values: string[]): string[] {
-  const seen = new Set<string>();
-  return values.filter(v => (seen.has(v) ? false : (seen.add(v), true)));
-}
-
-// One rotation of the n-gon: n evenly spaced hues. The rotation is supplied by
-// the caller so a palette stays stable for the lifetime of whatever owns it.
-// n is clamped to 256, matchColors' own ceiling -- a stratum column with more
-// distinct values than that has to wrap its index into this same palette
-// (see indexColor below), not assume palette.length === n.
-export function ngon(n: number, rotation: number, luminance: number = DEFAULT_LUMINANCE): RgbColor[] {
+// One rotation of the n-gon: n evenly spaced hues. n is clamped to the
+// wheel's own size, so a column with more distinct values than that has to
+// wrap its index back into the palette (see indexColor) rather than assume
+// palette.length === n.
+export function ngon(n: number, rotation: number, luminance: number = LUMINANCE): RgbColor[] {
   if (n <= 0) return [];
-  const clamped = Math.max(1, Math.min(ROTATIONS, n));
+  const clamped = Math.max(1, Math.min(WHEEL, n));
   const palettes = matchColors(clamped, luminance * 100);
   return palettes[rotation % palettes.length];
 }
 
-// A value column reads as a semicircle of the 256-gon: half the hue wheel,
-// walked from `rotation`.
-export function semicircle(rotation: number, luminance: number = DEFAULT_LUMINANCE): RgbColor[] {
-  const palettes = matchColors(ROTATIONS, luminance * 100);
-  return palettes[rotation % palettes.length].slice(0, ROTATIONS / 2);
+// A value column reads as half the wheel -- 128 stops walked from `rotation`.
+// Half rather than the full circle so the two ends of the ramp stay visually
+// distinct; a full circle would put min and max at the same hue.
+export function semicircle(rotation: number, luminance: number = LUMINANCE): RgbColor[] {
+  const palettes = matchColors(WHEEL, luminance * 100);
+  return palettes[rotation % palettes.length].slice(0, WHEEL / 2);
 }
 
-// The color for the i-th distinct value of an n-gon palette, wrapping once i
-// runs past the palette's own length (which may be smaller than n if n > 256
-// -- palette.length is what actually bounds the available colors). The
-// (palette.length + 1)-th distinct value reuses color 0, and so on.
+// Map normalized [0,1] onto a gradient: 0 lands on the first stop, 1 on the
+// last.
+export function gradientAt(t: number, gradient: RgbColor[]): RgbColor {
+  const clamped = Math.max(0, Math.min(1, t));
+  const index = Math.min(gradient.length - 1, Math.floor(clamped * (gradient.length - 1)));
+  return gradient[index];
+}
+
+// The color for the i-th distinct value, wrapping once i runs past the
+// palette's length. With more than 256 distinct values the 257th reuses the
+// first color, and so on -- the palette itself can never be longer.
 export function indexColor(palette: RgbColor[], i: number): RgbColor {
   return palette[i % palette.length];
 }
 
-// A color from `palette` not already in `used`, or null if every entry is
-// already taken (more nodes than palette entries).
-export function pickNodeColor(palette: RgbColor[], used: Iterable<RgbColor>): RgbColor | null {
-  const usedSet = new Set([...used].map(rgbStr));
-  const free = palette.filter(c => !usedSet.has(rgbStr(c)));
+// A neutral gray at a given lightness, [0,1]. Used where something needs to
+// match a background without being painted by colorBg itself.
+export function grayAt(lightness: number): RgbColor {
+  const l = Math.max(0, Math.min(1, lightness)) * 100;
+  return matchGrays(1, l, l)[0];
+}
+
+// The full 256-vertex wheel, in wheel order. Memoized: it never changes for
+// a given luminance, and the map renderer uploads it as a lookup texture.
+let wheelCache: { luminance: number; colors: RgbColor[] } | null = null;
+
+export function wheel(luminance: number = LUMINANCE): RgbColor[] {
+  if (wheelCache && wheelCache.luminance === luminance) return wheelCache.colors;
+  // n = 256 makes every gap 1, so rotation 0 is the vertices in wheel order.
+  const colors = matchColors(WHEEL, luminance * 100)[0];
+  wheelCache = { luminance, colors };
+  return colors;
+}
+
+// Which wheel vertex a color sits on, 0-255. Every color the app produces
+// comes off the wheel, so this is an exact lookup rather than an
+// approximation -- the nearest-match fallback only exists because two
+// adjacent vertices can round to the same 8-bit RGB triple on a small
+// enough circle.
+let indexCache: { luminance: number; byRgb: Map<string, number> } | null = null;
+
+export function hueIndexOf(color: RgbColor, luminance: number = LUMINANCE): number {
+  if (!indexCache || indexCache.luminance !== luminance) {
+    const byRgb = new Map<string, number>();
+    wheel(luminance).forEach((c, i) => {
+      const key = `${c.r},${c.g},${c.b}`;
+      if (!byRgb.has(key)) byRgb.set(key, i);
+    });
+    indexCache = { luminance, byRgb };
+  }
+  const exact = indexCache.byRgb.get(`${color.r},${color.g},${color.b}`);
+  if (exact !== undefined) return exact;
+
+  let best = 0;
+  let bestDistance = Infinity;
+  wheel(luminance).forEach((c, i) => {
+    const d = (c.r - color.r) ** 2 + (c.g - color.g) ** 2 + (c.b - color.b) ** 2;
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = i;
+    }
+  });
+  return best;
+}
+
+// A color from `palette` not already in `used`, or null once every entry is
+// taken.
+export function pickUnused(palette: RgbColor[], used: Iterable<RgbColor>): RgbColor | null {
+  const taken = new Set([...used].map(rgbStr));
+  const free = palette.filter(c => !taken.has(rgbStr(c)));
   if (free.length === 0) return null;
   return free[Math.floor(Math.random() * free.length)];
 }
 
-// Map normalized [0,1] onto a gradient.
-export function gradientAt(t: number, gradient: RgbColor[]): RgbColor {
-  const clamped = Math.max(0, Math.min(1, t));
-  const idx = Math.min(gradient.length - 1, Math.floor(clamped * (gradient.length - 1)));
-  return gradient[idx];
-}
-
-// A plain neutral gray at a given lightness, [0,1] where 0 = black, 1 = white.
-// Used wherever something needs to match colorBg's output without itself
-// being a .bg div walked by colorBg (e.g. an edge endpoint that fades to the
-// same color as an unloaded card).
-export function grayAt(lightness: number): RgbColor {
-  const l = Math.max(0, Math.min(1, lightness)) * 100;
-  return matchGrays(1, l, l)[0];
+// First-seen-order distinct values -- the scan order that decides which
+// palette entry each distinct value gets.
+export function uniqueOrdered<T>(values: T[]): T[] {
+  const seen = new Set<T>();
+  return values.filter(v => (seen.has(v) ? false : (seen.add(v), true)));
 }

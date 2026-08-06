@@ -5,22 +5,32 @@ import type { TableName } from './schema';
 import type { Table } from './tableMaker';
 
 // Which (table, column) pairs mean something to the map, and which geometry
-// bucket they drive.
-//
-// Deliberately empty for now: the mechanism is wired end to end, but nothing
-// is registered, so the map stays monochrome until we decide which columns
-// should drive it. Adding an entry here is the whole change -- Map itself
+// bucket they drive. Adding an entry here is the whole change -- Map itself
 // never learns this registry exists, it just reads whatever colors are
 // sitting on the geometry.
 export type MapTarget = 'zones' | 'network' | 'desireLines' | 'agents';
 
-export const MAP_DRIVERS: Partial<Record<TableName, Record<string, MapTarget>>> = {
+// A table's registration is either explicit columns by name, or the
+// wildcard `{ anyStratum: target }` meaning every stratum column of that
+// table drives the same target. agents needs the wildcard specifically:
+// agent_id/zone_id are guaranteed, but which other stratum dimensions
+// exist (if any) isn't fixed by name the way `resource` or `grade` are for
+// their tables -- it depends on what got synthesized.
+type Registration = Record<string, MapTarget> | { anyStratum: MapTarget };
+
+export const MAP_DRIVERS: Partial<Record<TableName, Registration>> = {
   desire_lines: { resource: 'desireLines' },
   network: { grade: 'network', road_type: 'network' },
+  agents: { anyStratum: 'agents' },
 };
 
-export function targetOf(table: TableName, column: string): MapTarget | null {
-  return MAP_DRIVERS[table]?.[column] ?? null;
+export function targetOf(table: TableName, column: string, tableData?: Table): MapTarget | null {
+  const registration = MAP_DRIVERS[table];
+  if (!registration) return null;
+  if ('anyStratum' in registration) {
+    return tableData?.strata.some(s => s.name === column) ? registration.anyStratum : null;
+  }
+  return registration[column] ?? null;
 }
 
 // The color for every row of a table under one selected column. Strata read
@@ -103,8 +113,8 @@ export function applyMapColors(
   ink: RgbColor,
   paper: RgbColor,
 ) {
-  const target = selection ? targetOf(selection.table, selection.column) : null;
   const table = selection ? tables[selection.table] : undefined;
+  const target = selection ? targetOf(selection.table, selection.column, table) : null;
   const colors = target && table ? rowColors(table, selection!.column) : null;
 
   const activeFor = (bucket: MapTarget) => (target === bucket && colors ? colors : null);
@@ -142,8 +152,9 @@ export function applyMapColors(
 export function activeLineLayer(
   geometries: Geometries,
   selection: { table: TableName; column: string } | null,
+  tables: Partial<Record<TableName, Table>>,
 ): 'network' | 'desireLines' | null {
-  const target = selection ? targetOf(selection.table, selection.column) : null;
+  const target = selection ? targetOf(selection.table, selection.column, tables[selection.table]) : null;
   if (target === 'network' && geometries.network) return 'network';
   if (target === 'desireLines' && geometries.desireLines) return 'desireLines';
   if (geometries.network) return 'network';
@@ -157,6 +168,9 @@ export function activeLineLayer(
 // extra passes would be pure cost for an identical picture.
 export function desireLinesAreColored(
   selection: { table: TableName; column: string } | null,
+  tables: Partial<Record<TableName, Table>>,
 ): boolean {
-  return selection ? targetOf(selection.table, selection.column) === 'desireLines' : false;
+  return selection
+    ? targetOf(selection.table, selection.column, tables[selection.table]) === 'desireLines'
+    : false;
 }

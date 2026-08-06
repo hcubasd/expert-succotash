@@ -170,8 +170,8 @@ export default function App() {
           dark={dark}
           geometries={geometries}
           bounds={bounds}
-          lineLayer={activeLineLayer(geometries, activeColumn)}
-          blendDesireLines={desireLinesAreColored(activeColumn)}
+          lineLayer={activeLineLayer(geometries, activeColumn, tables)}
+          blendDesireLines={desireLinesAreColored(activeColumn, tables)}
           colorVersion={colorVersion}
           onToggleDark={toggleDark}
           onDiagram={() => setView({ kind: 'diagram' })}

@@ -64,8 +64,12 @@ export class MapRenderer {
   private accumulator: { framebuffer: WebGLFramebuffer; texture: WebGLTexture; width: number; height: number } | null = null;
   private uploaded = new Map<string, Buffers>();
   private floatTargetsSupported: boolean;
+  // Which luminance the wheel texture currently holds, so a repeated
+  // setLuminance for the same mode (most frames) is a no-op rather than a
+  // re-upload.
+  private wheelLuminance: number | null = null;
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: HTMLCanvasElement, luminance: number) {
     const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
     if (!gl) throw new Error('WebGL2 is not available');
     this.gl = gl;
@@ -84,10 +88,27 @@ export class MapRenderer {
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
 
-    // The 256 wheel vertices as a lookup texture, so the resolve pass can turn
-    // an averaged angle straight back into the exact palette color instead of
-    // reimplementing CIELAB conversion in GLSL.
-    const colors = wheel();
+    this.wheelTexture = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.wheelTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    // REPEAT so an angle landing just past the last vertex wraps to the first,
+    // which is what a wheel should do.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.setLuminance(luminance);
+  }
+
+  // The 256 wheel vertices as a lookup texture, so the resolve pass can turn
+  // an averaged angle straight back into the exact palette color instead of
+  // reimplementing CIELAB conversion in GLSL. The wheel's colors depend on
+  // luminance (dark vs. light mode draw from different points on the gamut),
+  // so this has to be callable again whenever the mode changes, not just
+  // once at construction.
+  setLuminance(luminance: number) {
+    if (this.wheelLuminance === luminance) return;
+    const gl = this.gl;
+    const colors = wheel(luminance);
     const pixels = new Uint8Array(colors.length * 4);
     colors.forEach((c, i) => {
       pixels[i * 4] = c.r;
@@ -95,15 +116,9 @@ export class MapRenderer {
       pixels[i * 4 + 2] = c.b;
       pixels[i * 4 + 3] = 255;
     });
-    this.wheelTexture = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, this.wheelTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, colors.length, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    // REPEAT so an angle landing just past the last vertex wraps to the first,
-    // which is what a wheel should do.
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.wheelLuminance = luminance;
   }
 
   private buffers(

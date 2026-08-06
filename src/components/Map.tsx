@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { MapRenderer } from '../gl/renderer';
 import type { View } from '../gl/renderer';
+import { LUMINANCE_DARK, LUMINANCE_LIGHT } from '../lib/colors';
 import type { Bounds, Geometries } from '../lib/geometryMaker';
 
 type Props = {
@@ -61,7 +62,7 @@ export default function Map({
     const canvas = canvasRef.current;
     if (!canvas) return;
     try {
-      rendererRef.current = new MapRenderer(canvas);
+      rendererRef.current = new MapRenderer(canvas, dark ? LUMINANCE_DARK : LUMINANCE_LIGHT);
     } catch (error) {
       setFailed(error instanceof Error ? error.message : String(error));
       return;
@@ -101,6 +102,7 @@ export default function Map({
     const renderer = rendererRef.current;
     if (!renderer || size.width === 0) return;
     const paper = dark ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 };
+    renderer.setLuminance(dark ? LUMINANCE_DARK : LUMINANCE_LIGHT);
     renderer.render(geometries, viewRef.current, paper, lineLayer, blendDesireLines, colorVersion);
   });
 

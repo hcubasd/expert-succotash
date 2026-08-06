@@ -1,4 +1,4 @@
-import { gradientAt, hueIndexOf, indexColor, ngon, semicircle } from './colors';
+import { LUMINANCE_DARK, LUMINANCE_LIGHT, gradientAt, hueIndexOf, indexColor, ngon, semicircle } from './colors';
 import type { RgbColor } from './colors';
 import type { Geometries } from './geometryMaker';
 import type { TableName } from './schema';
@@ -37,10 +37,10 @@ export function targetOf(table: TableName, column: string, tableData?: Table): M
 // their palette index straight off the dictionary code; values normalize onto
 // a half-wheel gradient. Rows the column has no value for come back null and
 // keep the monochrome default.
-function rowColors(table: Table, column: string): (RgbColor | null)[] | null {
+function rowColors(table: Table, column: string, luminance: number): (RgbColor | null)[] | null {
   const stratum = table.strata.find(c => c.name === column);
   if (stratum) {
-    const palette = ngon(stratum.dictionary.length, stratum.rotation);
+    const palette = ngon(stratum.dictionary.length, stratum.rotation, luminance);
     if (palette.length === 0) return null;
     const colors: (RgbColor | null)[] = new Array(table.rowCount);
     for (let row = 0; row < table.rowCount; row++) {
@@ -52,7 +52,7 @@ function rowColors(table: Table, column: string): (RgbColor | null)[] | null {
   const value = table.values.find(c => c.name === column);
   if (!value) return null;
 
-  const gradient = semicircle(value.rotation);
+  const gradient = semicircle(value.rotation, luminance);
   const span = value.max - value.min;
   const colors: (RgbColor | null)[] = new Array(table.rowCount);
   for (let row = 0; row < table.rowCount; row++) {
@@ -82,7 +82,13 @@ function writeColors(
   }
 }
 
-function writeHues(target: Uint8Array, rowIndex: Uint32Array, colors: (RgbColor | null)[], fallback: RgbColor) {
+function writeHues(
+  target: Uint8Array,
+  rowIndex: Uint32Array,
+  colors: (RgbColor | null)[],
+  fallback: RgbColor,
+  luminance: number,
+) {
   // Cache per distinct color: hueIndexOf is a map lookup, but a nearest-match
   // miss walks all 256 vertices, and a segment buffer can hold hundreds of
   // thousands of vertices that share a handful of colors.
@@ -91,7 +97,7 @@ function writeHues(target: Uint8Array, rowIndex: Uint32Array, colors: (RgbColor 
     const key = `${color.r},${color.g},${color.b}`;
     let index = cache.get(key);
     if (index === undefined) {
-      index = hueIndexOf(color);
+      index = hueIndexOf(color, luminance);
       cache.set(key, index);
     }
     return index;
@@ -112,10 +118,12 @@ export function applyMapColors(
   selection: { table: TableName; column: string } | null,
   ink: RgbColor,
   paper: RgbColor,
+  dark: boolean,
 ) {
+  const luminance = dark ? LUMINANCE_DARK : LUMINANCE_LIGHT;
   const table = selection ? tables[selection.table] : undefined;
   const target = selection ? targetOf(selection.table, selection.column, table) : null;
-  const colors = target && table ? rowColors(table, selection!.column) : null;
+  const colors = target && table ? rowColors(table, selection!.column, luminance) : null;
 
   const activeFor = (bucket: MapTarget) => (target === bucket && colors ? colors : null);
 
@@ -136,7 +144,7 @@ export function applyMapColors(
     const lineColors = activeFor('desireLines');
     writeColors(geometries.desireLines.colors, geometries.desireLines.rowIndex, lineColors ?? [], ink);
     if (lineColors) {
-      writeHues(geometries.desireLines.hues, geometries.desireLines.rowIndex, lineColors, ink);
+      writeHues(geometries.desireLines.hues, geometries.desireLines.rowIndex, lineColors, ink, luminance);
     }
   }
 

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { colorBg, squeezeFg } from 'psychic-potato';
-import { gradientAt, indexColor, ngon, rgbStr, semicircle } from '../lib/colors';
+import { LUMINANCE_DARK, LUMINANCE_LIGHT, gradientAt, indexColor, ngon, rgbStr, semicircle } from '../lib/colors';
 import { stratumText, valueText } from '../lib/tableMaker';
 import type { StratumColumn, Table as TableData, ValueColumn } from '../lib/tableMaker';
 import { labelOf } from './diagramLayout';
@@ -27,7 +27,11 @@ const PAGE = 1000;
 
 type Cell = { text: string; fill?: string; onClick?: () => void };
 
-function CellBox({ cell, flex }: { cell: Cell; flex: number }) {
+function CellBox({ cell, flex, dark }: { cell: Cell; flex: number; dark: boolean }) {
+  // A filled cell's swatch sits at a different luminance per mode (see
+  // colors.ts: LUMINANCE_DARK is bright, LUMINANCE_LIGHT is mid-toned), so
+  // the readable ink flips with it -- black on dark mode's bright swatches,
+  // white on light mode's darker ones.
   return (
     <div
       className="bg"
@@ -35,7 +39,7 @@ function CellBox({ cell, flex }: { cell: Cell; flex: number }) {
       style={{ flex, cursor: cell.onClick ? 'pointer' : undefined, minWidth: 0 }}
       onClick={cell.onClick}
     >
-      <div className="fg" style={cell.fill ? { color: '#000' } : undefined}>{cell.text}</div>
+      <div className="fg" style={cell.fill ? { color: dark ? '#000' : '#fff' } : undefined}>{cell.text}</div>
     </div>
   );
 }
@@ -93,17 +97,19 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
   // Palette lookups are built once per selection, not per cell: a column's
   // codes are already palette indices, so painting stays a lookup even at a
   // million rows.
+  const luminance = dark ? LUMINANCE_DARK : LUMINANCE_LIGHT;
+
   const paint = useMemo(() => {
     if (!lit) return null;
     const stratum = table.strata.find(c => c.name === lit);
     if (stratum) {
-      const palette = ngon(stratum.dictionary.length, stratum.rotation);
+      const palette = ngon(stratum.dictionary.length, stratum.rotation, luminance);
       if (!palette.length) return null;
       return { kind: 'stratum' as const, ofCode: (code: number) => rgbStr(indexColor(palette, code)) };
     }
     const value = table.values.find(c => c.name === lit);
     if (!value) return null;
-    const gradient = semicircle(value.rotation);
+    const gradient = semicircle(value.rotation, luminance);
     const span = value.max - value.min;
     return {
       kind: 'value' as const,
@@ -113,7 +119,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
         return rgbStr(gradientAt(t, gradient));
       },
     };
-  }, [lit, table]);
+  }, [lit, table, luminance]);
 
   const stratumFill = (column: StratumColumn, code: number) =>
     lit === column.name && paint?.kind === 'stratum' ? paint.ofCode(code) : undefined;
@@ -156,7 +162,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
       return (
         <div className="bg" style={{ flexDirection: 'row', minHeight: ROW_H, flexShrink: 0 }}>
           {values.map(column => (
-            <CellBox key={column.name} flex={1} cell={{ text: column.name, onClick: () => onSelectColumn(column.name) }} />
+            <CellBox key={column.name} flex={1} cell={{ text: column.name, onClick: () => onSelectColumn(column.name) }} dark={dark} />
           ))}
         </div>
       );
@@ -164,7 +170,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
     const [first, ...rest] = remainingStrata;
     return (
       <div className="bg" style={{ flexDirection: 'row', minHeight: ROW_H, flexShrink: 0 }}>
-        <CellBox flex={1} cell={{ text: first.name, onClick: () => onSelectColumn(first.name) }} />
+        <CellBox flex={1} cell={{ text: first.name, onClick: () => onSelectColumn(first.name) }} dark={dark} />
         <div className="bg" style={{ flexDirection: 'column', flex: remaining - 1, minWidth: 0 }}>
           {renderHeader(rest)}
         </div>
@@ -185,7 +191,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
           {rowIndices.map(row => (
             <div key={row} className="bg" style={{ flexDirection: 'row', minHeight: ROW_H, flexShrink: 0 }}>
               {values.map(column => (
-                <CellBox key={column.name} flex={1} cell={{ text: valueText(column, row), fill: valueFill(column, row) }} />
+                <CellBox key={column.name} flex={1} cell={{ text: valueText(column, row), fill: valueFill(column, row) }} dark={dark} />
               ))}
             </div>
           ))}
@@ -218,6 +224,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
                 fill: stratumFill(first, group.code),
                 onClick: () => toggleFilter(first, group.code),
               }}
+              dark={dark}
             />
             <div className="bg" style={{ flexDirection: 'column', flex: remaining - 1, minWidth: 0 }}>
               {renderBody(group.rows, rest)}

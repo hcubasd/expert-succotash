@@ -2,11 +2,25 @@ import { matchColors, matchGrays } from 'miniature-waffle';
 export type { RgbColor } from 'miniature-waffle';
 import type { RgbColor } from 'miniature-waffle';
 
-// The one luminance every matchColors call in the app draws at, [0,1]. A
-// single global knob, not per-column: a stratum swatch and a value-gradient
+// The luminance every matchColors call in the app draws at, [0,1]. A single
+// global knob per mode, not per-column: a stratum swatch and a value-gradient
 // stop have to be directly comparable, which only holds if they sit on the
 // same circle.
-export const LUMINANCE = 0.75;
+//
+// LUMINANCE_DARK is the true (unrounded) peak of matchColors' 256-gon radius
+// r(L) -- the widest palette the sRGB gamut allows, found by golden-section
+// search over miniature-waffle's own radiusFinder. LUMINANCE_LIGHT is the
+// unique L on the other side of that peak with the same r/ΔL ratio to its
+// paper (ΔL = L - 0 for black paper, 100 - L for white paper) -- the palette
+// subtends the same visual angle from the page in both modes, rather than
+// matching absolute contrast (too costly in r) or absolute radius (no
+// contrast margin against a light background). Both solved once by root-
+// finding against radiusFinder and pinned here as constants; see
+// conversation/commit history for the derivation, not worth re-deriving at
+// runtime.
+export const LUMINANCE_DARK = 0.73912;
+export const LUMINANCE_LIGHT = 0.47665;
+export const LUMINANCE = LUMINANCE_DARK;
 
 // matchColors places its palette on a circle in CIELAB at fixed L, sampling
 // 256 evenly spaced vertices and returning all 256 rotations of the n-gon
@@ -105,15 +119,6 @@ export function hueIndexOf(color: RgbColor, luminance: number = LUMINANCE): numb
     }
   });
   return best;
-}
-
-// A color from `palette` not already in `used`, or null once every entry is
-// taken.
-export function pickUnused(palette: RgbColor[], used: Iterable<RgbColor>): RgbColor | null {
-  const taken = new Set([...used].map(rgbStr));
-  const free = palette.filter(c => !taken.has(rgbStr(c)));
-  if (free.length === 0) return null;
-  return free[Math.floor(Math.random() * free.length)];
 }
 
 // First-seen-order distinct values -- the scan order that decides which

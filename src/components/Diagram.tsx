@@ -1,7 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { squeezeFg } from 'psychic-potato';
-import { grayAt, ngon, pickUnused, randomRotation, rgbStr } from '../lib/colors';
-import type { RgbColor } from '../lib/colors';
+import { LUMINANCE_DARK, LUMINANCE_LIGHT, grayAt, ngon, randomRotation, rgbStr } from '../lib/colors';
 import { EDGES, NODES, labelOf } from './diagramLayout';
 import type { TableName } from '../lib/schema';
 
@@ -35,21 +34,28 @@ export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack,
   // card got which hue. One rotation for the session, colors handed out as
   // files arrive so the set of used hues always matches what's loaded.
   const [rotation] = useState(randomRotation);
-  const palette = useMemo(() => ngon(NODES.length, rotation), [rotation]);
-  const [nodeColors, setNodeColors] = useState<Map<TableName, RgbColor>>(new Map());
+  const luminance = dark ? LUMINANCE_DARK : LUMINANCE_LIGHT;
+  const palette = useMemo(() => ngon(NODES.length, rotation, luminance), [rotation, luminance]);
+  // Which palette index each loaded table drew -- not the resolved color.
+  // Storing the index is what lets a dark/light toggle repaint every
+  // already-assigned card at the new luminance for free: the index stays
+  // put, palette[index] just points at a different point on the new circle.
+  const [nodeIndices, setNodeIndices] = useState<Map<TableName, number>>(new Map());
 
   useEffect(() => {
-    setNodeColors(previous => {
-      let next: Map<TableName, RgbColor> | null = null;
+    setNodeIndices(previous => {
+      let next: Map<TableName, number> | null = null;
       for (const id of loaded) {
         if (previous.has(id)) continue;
-        const pick = pickUnused(palette, (next ?? previous).values());
-        if (!pick) break;
+        const used = new Set((next ?? previous).values());
+        const free: number[] = [];
+        for (let i = 0; i < palette.length; i++) if (!used.has(i)) free.push(i);
+        if (free.length === 0) break;
         next = next ?? new Map(previous);
-        next.set(id, pick);
+        next.set(id, free[Math.floor(Math.random() * free.length)]);
       }
-      // Drop colors for anything no longer loaded, so a cleared file frees its
-      // hue back to the palette.
+      // Drop indices for anything no longer loaded, so a cleared file frees
+      // its hue back to the palette.
       for (const id of previous.keys()) {
         if (!loaded.has(id)) {
           next = next ?? new Map(previous);
@@ -78,8 +84,11 @@ export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack,
   }, []);
 
   const colorOf = useCallback(
-    (id: TableName) => rgbStr(nodeColors.get(id) ?? blank),
-    [nodeColors, blank],
+    (id: TableName) => {
+      const index = nodeIndices.get(id);
+      return rgbStr(index !== undefined ? palette[index] : blank);
+    },
+    [nodeIndices, palette, blank],
   );
 
   const measureEdges = useCallback(() => {
@@ -166,7 +175,8 @@ export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack,
           <div style={{ display: 'flex', flexDirection: 'column', flex: CARD_WEIGHT, minWidth: 0 }}>
             <Spacer weight={GAP_WEIGHT} />
             {nodes.map((node, ni) => {
-              const color = nodeColors.get(node.id);
+              const index = nodeIndices.get(node.id);
+              const color = index !== undefined ? palette[index] : undefined;
               return (
                 <Fragment key={node.id}>
                   {ni > 0 && <Spacer weight={GAP_WEIGHT} />}

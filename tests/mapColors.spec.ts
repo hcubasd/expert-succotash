@@ -40,21 +40,21 @@ afterEach(() => {
 describe('applyMapColors', () => {
   it('paints everything in the ink color when nothing is selected', () => {
     const geometries = scene();
-    applyMapColors(geometries, {}, null, INK, PAPER);
+    applyMapColors(geometries, {}, null, INK, PAPER, false);
     expect(Array.from(geometries.network!.colors.slice(0, 3))).toEqual([255, 255, 255]);
     expect(Array.from(geometries.agents!.colors.slice(0, 3))).toEqual([255, 255, 255]);
   });
 
   it('stays monochrome for a column the map has no registered meaning for', () => {
     const geometries = scene();
-    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER);
+    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER, false);
     expect(Array.from(geometries.network!.colors.slice(0, 3))).toEqual([255, 255, 255]);
   });
 
   it('colors a bucket once its column is registered, distinctly per stratum value', () => {
     MAP_DRIVERS.network = { road_type: 'network' };
     const geometries = scene();
-    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER);
+    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER, false);
 
     const first = Array.from(geometries.network!.colors.slice(0, 3));
     const second = Array.from(geometries.network!.colors.slice(6, 9));
@@ -66,14 +66,14 @@ describe('applyMapColors', () => {
   it('leaves other buckets monochrome when only one is driven', () => {
     MAP_DRIVERS.network = { road_type: 'network' };
     const geometries = scene();
-    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER);
+    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER, false);
     expect(Array.from(geometries.agents!.colors.slice(0, 3))).toEqual([255, 255, 255]);
   });
 
   it('gives both vertices of a segment the same color, so a line is never a gradient', () => {
     MAP_DRIVERS.network = { road_type: 'network' };
     const geometries = scene();
-    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER);
+    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER, false);
     expect(Array.from(geometries.network!.colors.slice(0, 3)))
       .toEqual(Array.from(geometries.network!.colors.slice(3, 6)));
   });
@@ -111,7 +111,7 @@ describe('the anyStratum wildcard (agents)', () => {
 
   it('colors agents distinctly per zone_id end to end', () => {
     const geometries = scene();
-    applyMapColors(geometries, { agents: agentsTable }, { table: 'agents', column: 'zone_id' }, INK, PAPER);
+    applyMapColors(geometries, { agents: agentsTable }, { table: 'agents', column: 'zone_id' }, INK, PAPER, false);
     const first = Array.from(geometries.agents!.colors.slice(0, 3));
     const second = Array.from(geometries.agents!.colors.slice(3, 6));
     expect(first).not.toEqual([255, 255, 255]);

@@ -64,6 +64,7 @@ export default function App() {
         selection,
         isDark ? INK.dark : INK.light,
         isDark ? PAPER.dark : PAPER.light,
+        isDark,
       );
       setColorVersion(v => v + 1);
     },

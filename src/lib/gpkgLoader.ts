@@ -83,17 +83,24 @@ function parseGeoPackageBlob(data: Uint8Array): RawGeometry {
   if (data.length < 8 || data[0] !== 0x47 || data[1] !== 0x50) return null;
   const envelopeType = (data[3] >> 1) & 0x07;
   const envelopeBytes = [0, 32, 48, 48, 64][envelopeType] ?? 0;
-  return parseWkb(data, 8 + envelopeBytes);
+  return parseWkb(data, 8 + envelopeBytes).geometry;
 }
 
-function parseWkb(data: Uint8Array, offset: number): RawGeometry {
-  if (offset + 5 > data.length) return null;
+// Returns where parsing stopped alongside the geometry, since a Multi* value
+// is a count followed by that many complete nested WKB geometries -- each
+// with its own byte-order and type header -- so parsing one part has to know
+// where it ended for the next one to start.
+export type Parsed = { geometry: RawGeometry; end: number };
+
+export function parseWkb(data: Uint8Array, offset: number): Parsed {
+  if (offset + 5 > data.length) return { geometry: null, end: data.length };
   const little = data[offset] === 1;
   const type = readU32(data, offset + 1, little);
   const base = offset + 5;
 
   if (type === 1) {
-    return { type: 'Point', coordinates: [readF64(data, base, little), readF64(data, base + 8, little)] };
+    const geometry: RawGeometry = { type: 'Point', coordinates: [readF64(data, base, little), readF64(data, base + 8, little)] };
+    return { geometry, end: base + 16 };
   }
   if (type === 2) {
     const n = readU32(data, base, little);
@@ -102,7 +109,7 @@ function parseWkb(data: Uint8Array, offset: number): RawGeometry {
       const at = base + 4 + i * 16;
       coordinates.push([readF64(data, at, little), readF64(data, at + 8, little)]);
     }
-    return { type: 'LineString', coordinates };
+    return { geometry: { type: 'LineString', coordinates }, end: base + 4 + n * 16 };
   }
   if (type === 3) {
     const ringCount = readU32(data, base, little);
@@ -118,9 +125,51 @@ function parseWkb(data: Uint8Array, offset: number): RawGeometry {
       }
       coordinates.push(ring);
     }
-    return { type: 'Polygon', coordinates };
+    return { geometry: { type: 'Polygon', coordinates }, end: at };
   }
-  return null;
+  if (type === 4) return parseMultiPoint(data, base, little);
+  if (type === 5) return parseMultiLineString(data, base, little);
+  if (type === 6) return parseMultiPolygon(data, base, little);
+  return { geometry: null, end: data.length };
+}
+
+// Each Multi* value is a count followed by that many complete nested WKB
+// geometries -- each with its own byte-order and type header -- which is why
+// these delegate back into parseWkb rather than reading points/rings inline.
+function parseMultiPoint(data: Uint8Array, base: number, little: boolean): Parsed {
+  const n = readU32(data, base, little);
+  let at = base + 4;
+  const coordinates: [number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    const part = parseWkb(data, at);
+    if (part.geometry?.type === 'Point') coordinates.push(part.geometry.coordinates);
+    at = part.end;
+  }
+  return { geometry: { type: 'MultiPoint', coordinates }, end: at };
+}
+
+function parseMultiLineString(data: Uint8Array, base: number, little: boolean): Parsed {
+  const n = readU32(data, base, little);
+  let at = base + 4;
+  const coordinates: [number, number][][] = [];
+  for (let i = 0; i < n; i++) {
+    const part = parseWkb(data, at);
+    if (part.geometry?.type === 'LineString') coordinates.push(part.geometry.coordinates);
+    at = part.end;
+  }
+  return { geometry: { type: 'MultiLineString', coordinates }, end: at };
+}
+
+function parseMultiPolygon(data: Uint8Array, base: number, little: boolean): Parsed {
+  const n = readU32(data, base, little);
+  let at = base + 4;
+  const coordinates: [number, number][][][] = [];
+  for (let i = 0; i < n; i++) {
+    const part = parseWkb(data, at);
+    if (part.geometry?.type === 'Polygon') coordinates.push(part.geometry.coordinates);
+    at = part.end;
+  }
+  return { geometry: { type: 'MultiPolygon', coordinates }, end: at };
 }
 
 function readU32(d: Uint8Array, o: number, little: boolean): number {

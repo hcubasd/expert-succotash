@@ -15,7 +15,8 @@ import type { Table } from './tableMaker';
 export type MapTarget = 'zones' | 'network' | 'desireLines' | 'agents';
 
 export const MAP_DRIVERS: Partial<Record<TableName, Record<string, MapTarget>>> = {
-  // e.g. network: { road_type: 'network' },
+  desire_lines: { resource: 'desireLines' },
+  network: { grade: 'network', road_type: 'network' },
 };
 
 export function targetOf(table: TableName, column: string): MapTarget | null {

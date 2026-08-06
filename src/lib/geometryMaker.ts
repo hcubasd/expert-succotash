@@ -42,12 +42,21 @@ export function rawBounds(geometries: RawGeometry[]): Bounds | null {
     if (x > maxX) maxX = x;
     if (y > maxY) maxY = y;
   };
+  const visitLine = (line: [number, number][]) => {
+    for (const [x, y] of line) visit(x, y);
+  };
+  const visitPolygon = (rings: [number, number][][]) => {
+    for (const ring of rings) visitLine(ring);
+  };
 
   for (const geometry of geometries) {
     if (!geometry) continue;
     if (geometry.type === 'Point') visit(geometry.coordinates[0], geometry.coordinates[1]);
-    else if (geometry.type === 'LineString') for (const [x, y] of geometry.coordinates) visit(x, y);
-    else for (const ring of geometry.coordinates) for (const [x, y] of ring) visit(x, y);
+    else if (geometry.type === 'LineString') visitLine(geometry.coordinates);
+    else if (geometry.type === 'Polygon') visitPolygon(geometry.coordinates);
+    else if (geometry.type === 'MultiPoint') for (const [x, y] of geometry.coordinates) visit(x, y);
+    else if (geometry.type === 'MultiLineString') for (const line of geometry.coordinates) visitLine(line);
+    else for (const polygon of geometry.coordinates) visitPolygon(polygon);
   }
 
   if (minX > maxX || minY > maxY) return null;
@@ -102,6 +111,15 @@ export function emptyGeometries(): Geometries {
   return { zones: null, network: null, desireLines: null, agents: null };
 }
 
+// One row's worth of polygon parts -- a plain Polygon is one part, a
+// MultiPolygon is however many the file gave it. A disjoint exclave under
+// one zone_id is more geometry for that row, not a second row.
+function polygonParts(geometry: RawGeometry): [number, number][][][] {
+  if (geometry?.type === 'Polygon') return [geometry.coordinates];
+  if (geometry?.type === 'MultiPolygon') return geometry.coordinates;
+  return [];
+}
+
 export function makePolygons(geometries: RawGeometry[], origin: Origin): PolygonGeometry {
   const fill: number[] = [];
   const fillRow: number[] = [];
@@ -109,30 +127,30 @@ export function makePolygons(geometries: RawGeometry[], origin: Origin): Polygon
   const borderRow: number[] = [];
 
   geometries.forEach((geometry, row) => {
-    if (!geometry || geometry.type !== 'Polygon') return;
-    const rings = geometry.coordinates;
-    if (rings.length === 0) return;
+    for (const rings of polygonParts(geometry)) {
+      if (rings.length === 0) continue;
 
-    // earcut wants one flat coordinate array plus the start index of each
-    // hole; rings past the first are holes.
-    const flat: number[] = [];
-    const holes: number[] = [];
-    rings.forEach((ring, r) => {
-      if (r > 0) holes.push(flat.length / 2);
-      for (const [x, y] of ring) flat.push(x - origin.x, y - origin.y);
-    });
+      // earcut wants one flat coordinate array plus the start index of each
+      // hole; rings past the first are holes.
+      const flat: number[] = [];
+      const holes: number[] = [];
+      rings.forEach((ring, r) => {
+        if (r > 0) holes.push(flat.length / 2);
+        for (const [x, y] of ring) flat.push(x - origin.x, y - origin.y);
+      });
 
-    for (const index of earcut(flat, holes.length ? holes : undefined, 2)) {
-      fill.push(flat[index * 2], flat[index * 2 + 1]);
-      fillRow.push(row);
-    }
+      for (const index of earcut(flat, holes.length ? holes : undefined, 2)) {
+        fill.push(flat[index * 2], flat[index * 2 + 1]);
+        fillRow.push(row);
+      }
 
-    for (const ring of rings) {
-      for (let i = 0; i < ring.length; i++) {
-        const [x1, y1] = ring[i];
-        const [x2, y2] = ring[(i + 1) % ring.length];
-        border.push(x1 - origin.x, y1 - origin.y, x2 - origin.x, y2 - origin.y);
-        borderRow.push(row, row);
+      for (const ring of rings) {
+        for (let i = 0; i < ring.length; i++) {
+          const [x1, y1] = ring[i];
+          const [x2, y2] = ring[(i + 1) % ring.length];
+          border.push(x1 - origin.x, y1 - origin.y, x2 - origin.x, y2 - origin.y);
+          borderRow.push(row, row);
+        }
       }
     }
   });
@@ -148,18 +166,26 @@ export function makePolygons(geometries: RawGeometry[], origin: Origin): Polygon
   };
 }
 
+// A plain LineString is one span, a MultiLineString is however many the
+// file gave it -- all decomposed into segments belonging to the same row.
+function lineStrings(geometry: RawGeometry): [number, number][][] {
+  if (geometry?.type === 'LineString') return [geometry.coordinates];
+  if (geometry?.type === 'MultiLineString') return geometry.coordinates;
+  return [];
+}
+
 export function makeSegments(geometries: RawGeometry[], origin: Origin): SegmentGeometry {
   const positions: number[] = [];
   const rowIndex: number[] = [];
 
   geometries.forEach((geometry, row) => {
-    if (!geometry || geometry.type !== 'LineString') return;
-    const coords = geometry.coordinates;
-    for (let i = 0; i + 1 < coords.length; i++) {
-      const [x1, y1] = coords[i];
-      const [x2, y2] = coords[i + 1];
-      positions.push(x1 - origin.x, y1 - origin.y, x2 - origin.x, y2 - origin.y);
-      rowIndex.push(row, row);
+    for (const coords of lineStrings(geometry)) {
+      for (let i = 0; i + 1 < coords.length; i++) {
+        const [x1, y1] = coords[i];
+        const [x2, y2] = coords[i + 1];
+        positions.push(x1 - origin.x, y1 - origin.y, x2 - origin.x, y2 - origin.y);
+        rowIndex.push(row, row);
+      }
     }
   });
 
@@ -177,13 +203,20 @@ export function makePoints(geometries: RawGeometry[], origin: Origin): PointGeom
   const positions: number[] = [];
 
   for (const geometry of geometries) {
-    if (!geometry || geometry.type !== 'Point') {
-      // Keep the row/vertex correspondence 1:1 even for a missing geometry,
-      // so a point's index is always its row index.
+    // An agent is inherently one place, so unlike segments/polygons this
+    // doesn't grow into a many-vertices-per-row model for MultiPoint -- the
+    // first part is used and any further ones are dropped. Keeps the
+    // row/vertex correspondence 1:1 even for a missing geometry, so a
+    // point's index is always its row index.
+    const point =
+      geometry?.type === 'Point' ? geometry.coordinates
+      : geometry?.type === 'MultiPoint' ? geometry.coordinates[0]
+      : null;
+    if (!point) {
       positions.push(NaN, NaN);
       continue;
     }
-    positions.push(geometry.coordinates[0] - origin.x, geometry.coordinates[1] - origin.y);
+    positions.push(point[0] - origin.x, point[1] - origin.y);
   }
 
   return {

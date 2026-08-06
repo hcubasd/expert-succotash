@@ -6,10 +6,9 @@ import type { RawGeometry } from '../src/lib/rawTable';
 
 const point = (x: number, y: number): RawGeometry => ({ type: 'Point', coordinates: [x, y] });
 const line = (coords: [number, number][]): RawGeometry => ({ type: 'LineString', coordinates: coords });
-const square = (): RawGeometry => ({
-  type: 'Polygon',
-  coordinates: [[[0, 0], [1, 0], [1, 1], [0, 1]]],
-});
+const squareRings: [number, number][][] = [[[0, 0], [1, 0], [1, 1], [0, 1]]];
+const triangleRings: [number, number][][] = [[[10, 10], [11, 10], [11, 11]]];
+const square = (): RawGeometry => ({ type: 'Polygon', coordinates: squareRings });
 
 describe('makeSegments', () => {
   it('flattens a two-point line into one segment', () => {
@@ -35,6 +34,16 @@ describe('makeSegments', () => {
     const g = makeSegments([line([[0, 0], [1, 1]]), line([[2, 2], [3, 3]])], ZERO_ORIGIN);
     expect(Array.from(g.rowIndex)).toEqual([0, 0, 1, 1]);
   });
+
+  it('decomposes every span of a MultiLineString under the same row', () => {
+    const g = makeSegments(
+      [{ type: 'MultiLineString', coordinates: [[[0, 0], [1, 0]], [[5, 5], [6, 5], [7, 5]]] }],
+      ZERO_ORIGIN,
+    );
+    // one segment from the first span, two from the second
+    expect(g.positions.length / 4).toBe(3);
+    expect([...new Set(g.rowIndex)]).toEqual([0]);
+  });
 });
 
 describe('makePolygons', () => {
@@ -54,6 +63,29 @@ describe('makePolygons', () => {
     expect(g.fillPositions.length).toBe(0);
     expect(g.borderPositions.length).toBe(0);
   });
+
+  it('triangulates every part of a MultiPolygon under the same row', () => {
+    // A disjoint exclave under one zone_id -- two separate triangles, both
+    // tagged to row 0, not treated as two features.
+    const g = makePolygons(
+      [{ type: 'MultiPolygon', coordinates: [squareRings, triangleRings] }],
+      ZERO_ORIGIN,
+    );
+    expect(g.fillPositions.length / 2).toBe(9); // 2 triangles from the square + 1 from the triangle
+    expect([...new Set(g.fillRowIndex)]).toEqual([0]);
+    expect(g.borderPositions.length / 4).toBe(7); // 4 edges from the square + 3 from the triangle
+  });
+
+  it('keeps MultiPolygon rows distinct from each other', () => {
+    const g = makePolygons(
+      [
+        { type: 'MultiPolygon', coordinates: [squareRings] },
+        { type: 'MultiPolygon', coordinates: [triangleRings] },
+      ],
+      ZERO_ORIGIN,
+    );
+    expect([...new Set(g.fillRowIndex)]).toEqual([0, 1]);
+  });
 });
 
 describe('makePoints', () => {
@@ -65,6 +97,12 @@ describe('makePoints', () => {
     expect(g.positions[4]).toBe(3);
     // the missing one is non-finite rather than silently shifting the rest
     expect(Number.isFinite(g.positions[2])).toBe(false);
+  });
+
+  it('takes the first part of a MultiPoint rather than growing many vertices per row', () => {
+    const g = makePoints([{ type: 'MultiPoint', coordinates: [[1, 2], [9, 9]] }], ZERO_ORIGIN);
+    expect(g.positions.length / 2).toBe(1);
+    expect(Array.from(g.positions)).toEqual([1, 2]);
   });
 });
 

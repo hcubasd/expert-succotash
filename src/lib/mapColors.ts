@@ -1,4 +1,6 @@
-import { LUMINANCE_DARK, LUMINANCE_LIGHT, gradientAt, hueIndexOf, indexColor, ngon, semicircle } from './colors';
+import {
+  LUMINANCE_DARK, LUMINANCE_LIGHT, gradientAt, grayAt, hueIndexOf, indexColor, ngon, semicircle,
+} from './colors';
 import type { RgbColor } from './colors';
 import type { Geometries } from './geometryMaker';
 import type { TableName } from './schema';
@@ -22,6 +24,7 @@ export const MAP_DRIVERS: Partial<Record<TableName, Registration>> = {
   desire_lines: { resource: 'desireLines' },
   network: { grade: 'network', road_type: 'network' },
   agents: { anyStratum: 'agents' },
+  zones: { zone_id: 'zones' },
 };
 
 export function targetOf(table: TableName, column: string, tableData?: Table): MapTarget | null {
@@ -108,19 +111,29 @@ function writeHues(
   }
 }
 
-// Paint every geometry bucket for the current selection. A bucket whose table
-// isn't the selected one -- or the whole scene, when nothing map-affecting is
-// selected -- gets the monochrome ink color, which is what "default state"
-// means here.
+// The mode's two monochrome extremes. Both are pure functions of the mode,
+// so they're derived rather than threaded in -- passing one alongside `dark`
+// invites the two disagreeing (white ink in light mode, say).
+export const inkOf = (dark: boolean): RgbColor =>
+  (dark ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 });
+export const paperOf = (dark: boolean): RgbColor =>
+  (dark ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 });
+
+// Paint every geometry bucket for the current selection. Undriven buckets
+// fall back to a fixed default per bucket rather than one shared color:
+// lines oppose the background, zone fill sits at the palette's gray, and
+// zone outlines and agents take the background itself -- outlines so they
+// read as cuts through the fill, agents so they stay legible against the
+// zones and lines they always draw on top of.
 export function applyMapColors(
   geometries: Geometries,
   tables: Partial<Record<TableName, Table>>,
   selection: { table: TableName; column: string } | null,
-  ink: RgbColor,
-  paper: RgbColor,
   dark: boolean,
 ) {
   const luminance = dark ? LUMINANCE_DARK : LUMINANCE_LIGHT;
+  const ink = inkOf(dark);
+  const paper = paperOf(dark);
   const table = selection ? tables[selection.table] : undefined;
   const target = selection ? targetOf(selection.table, selection.column, table) : null;
   const colors = target && table ? rowColors(table, selection!.column, luminance) : null;
@@ -129,10 +142,13 @@ export function applyMapColors(
 
   if (geometries.zones) {
     const zoneColors = activeFor('zones');
-    // Zone fill is background-colored when nothing drives it: present, but
-    // reading as empty behind everything else.
-    writeColors(geometries.zones.fillColors, geometries.zones.fillRowIndex, zoneColors ?? [], zoneColors ? ink : paper);
-    writeColors(geometries.zones.borderColors, geometries.zones.borderRowIndex, [], ink);
+    // Fill sits at the palette's own neutral gray when nothing drives it --
+    // the shade diagram view gives an unloaded card -- so zones read as a
+    // real surface rather than as empty paper. The outline then takes the
+    // background color, so it reads as a seam cut through that surface
+    // rather than as a drawn-on border.
+    writeColors(geometries.zones.fillColors, geometries.zones.fillRowIndex, zoneColors ?? [], grayAt(luminance));
+    writeColors(geometries.zones.borderColors, geometries.zones.borderRowIndex, [], paper);
   }
 
   if (geometries.network) {
@@ -150,7 +166,11 @@ export function applyMapColors(
 
   if (geometries.agents) {
     const agentColors = activeFor('agents');
-    writeColors(geometries.agents.colors, null, agentColors ?? [], ink);
+    // Paper, not ink: agents always draw on top of the zone fill and the
+    // line layers, so the background color is what stays legible against
+    // all three. Note this leaves them invisible on an empty canvas -- with
+    // no zones loaded they'd be paper on paper.
+    writeColors(geometries.agents.colors, null, agentColors ?? [], paper);
   }
 }
 

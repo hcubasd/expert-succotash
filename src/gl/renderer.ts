@@ -10,7 +10,11 @@ import {
 
 export type View = { centerX: number; centerY: number; scaleX: number; scaleY: number };
 
-const AGENT_RADIUS_PX = 2.5;
+// In CSS pixels, not device pixels: the canvas backing store is scaled up by
+// devicePixelRatio, so a radius measured against it directly would come out
+// half-size on a 2x display instead of the same apparent size at twice the
+// sharpness. Callers pass the ratio in and it's applied at the uniform.
+const AGENT_RADIUS_CSS_PX = 2.5;
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type)!;
@@ -209,6 +213,7 @@ export class MapRenderer {
     width: number,
     height: number,
     colorVersion: number,
+    pixelRatio: number,
   ) {
     if (positions.length === 0) return;
     const gl = this.gl;
@@ -217,11 +222,13 @@ export class MapRenderer {
     gl.useProgram(this.points);
     this.setTransform(this.points, view);
     // Radius is specified in pixels, so agents keep a constant on-screen size
-    // no matter how far the view is zoomed in.
+    // no matter how far the view is zoomed in. width/height are the backing
+    // store's device pixels, so the CSS radius is scaled by the ratio first.
+    const radius = AGENT_RADIUS_CSS_PX * pixelRatio;
     gl.uniform2f(
       gl.getUniformLocation(this.points, 'u_pixelRadius'),
-      (AGENT_RADIUS_PX * 2) / width,
-      (AGENT_RADIUS_PX * 2) / height,
+      (radius * 2) / width,
+      (radius * 2) / height,
     );
 
     const cornerLoc = gl.getAttribLocation(this.points, 'a_corner');
@@ -343,6 +350,7 @@ export class MapRenderer {
     lineLayer: 'network' | 'desireLines' | null,
     blendDesireLines: boolean,
     colorVersion: number,
+    pixelRatio: number,
   ) {
     const gl = this.gl;
     const width = gl.drawingBufferWidth;
@@ -372,7 +380,9 @@ export class MapRenderer {
     }
 
     if (geometries.agents) {
-      this.drawPoints(geometries.agents.positions, geometries.agents.colors, view, width, height, colorVersion);
+      this.drawPoints(
+        geometries.agents.positions, geometries.agents.colors, view, width, height, colorVersion, pixelRatio,
+      );
     }
   }
 

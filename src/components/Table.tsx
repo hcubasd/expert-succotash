@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { colorBg, squeezeFg } from 'psychic-potato';
 import { LUMINANCE_DARK, LUMINANCE_LIGHT, gradientAt, indexColor, ngon, rgbStr, semicircle } from '../lib/colors';
 import { stratumText, valueText } from '../lib/tableMaker';
@@ -23,7 +23,11 @@ const ROW_H = 20;
 const MIN_COL_WIDTH = 72;
 // Rows are appended in blocks as the body scrolls to its end -- the whole
 // table is scanned once at load time, but only a window of it is ever mounted.
-const PAGE = 1000;
+// Each block is grouped on its own and appended as a sibling, never merged
+// into what's already on screen: merging would regroup the last group and
+// re-centre its label under the reader. The cost is that a group spanning a
+// block boundary shows its label once per block.
+const PAGE = 100;
 
 type Cell = { text: string; fill?: string; onClick?: () => void };
 
@@ -90,7 +94,18 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
     return kept;
   }, [filters, table]);
 
-  const visible = useMemo(() => rows.slice(0, limit), [rows, limit]);
+  // Blocks of PAGE rows, each grouped independently at render time. Only the
+  // last one is ever new, so appending leaves every mounted block untouched.
+  const batches = useMemo(() => {
+    const end = Math.min(limit, rows.length);
+    const out: number[][] = [];
+    for (let start = 0; start < end; start += PAGE) {
+      out.push(rows.slice(start, Math.min(start + PAGE, end)));
+    }
+    return out;
+  }, [rows, limit]);
+
+  const shown = Math.min(limit, rows.length);
 
   useEffect(() => setLimit(PAGE), [filters, table]);
 
@@ -155,12 +170,24 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
     else if (valuesOrder.includes(lit)) setValuesOrder(rotate);
   }
 
-  function renderHeader(remainingStrata: StratumColumn[]): React.ReactNode {
+  // The header IS its top row -- no container around it, since unlike the
+  // body it never holds more than one. `outer` marks that top row so it can
+  // carry the ref and the width the body shares; wrapping it instead would
+  // cost a .bg level and push every header cell a depth deeper than it is.
+  function renderHeader(remainingStrata: StratumColumn[], outer = false): React.ReactNode {
     const remaining = remainingStrata.length + values.length;
+    const rowRef = outer ? headerRef : undefined;
+    const rowStyle: React.CSSProperties = {
+      flexDirection: 'row',
+      minHeight: ROW_H,
+      flexShrink: 0,
+      ...(outer ? { minWidth: minTableWidth } : null),
+    };
+
     if (remainingStrata.length === 0) {
       if (values.length === 0) return null;
       return (
-        <div className="bg" style={{ flexDirection: 'row', minHeight: ROW_H, flexShrink: 0 }}>
+        <div ref={rowRef} className="bg" style={rowStyle}>
           {values.map(column => (
             <CellBox key={column.name} flex={1} cell={{ text: column.name, onClick: () => onSelectColumn(column.name) }} dark={dark} />
           ))}
@@ -169,7 +196,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
     }
     const [first, ...rest] = remainingStrata;
     return (
-      <div className="bg" style={{ flexDirection: 'row', minHeight: ROW_H, flexShrink: 0 }}>
+      <div ref={rowRef} className="bg" style={rowStyle}>
         <CellBox flex={1} cell={{ text: first.name, onClick: () => onSelectColumn(first.name) }} dark={dark} />
         <div className="bg" style={{ flexDirection: 'column', flex: remaining - 1, minWidth: 0 }}>
           {renderHeader(rest)}
@@ -235,35 +262,62 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
     );
   }
 
+  // Repaint the depth ramp, then lay the selected column's own colors back
+  // over it. Every trigger here is one that puts unpainted .bg divs on the
+  // screen -- a new file, a reorder, a filter, an appended block -- plus the
+  // two that change what the paint should be: the mode and the selection.
   useLayoutEffect(() => {
     const root = rootRef.current;
-    const header = headerRef.current;
     if (!root) return;
-
     colorBg(root, { from: 0.75, to: dark ? 0 : 1 });
     root.querySelectorAll<HTMLElement>('[data-fill]').forEach(el => {
       const fill = el.dataset.fill;
       if (fill) el.style.backgroundColor = fill;
     });
+  }, [dark, lit, table, strataOrder, valuesOrder, filters, batches.length]);
 
-    // Only the header is measured, then every cell is held to that size.
-    // Fitting the whole table would re-measure every mounted cell on each
-    // step of the search -- and again on every appended page -- for a size
-    // the columns already share.
-    if (!header || !header.querySelector('div.fg')) return;
+  // Only the header is measured; the body inherits the result. Fitting the
+  // whole table would re-measure every mounted cell on each step of the
+  // search for a size the columns already share.
+  const fitFont = useCallback(() => {
+    const root = rootRef.current;
+    const header = headerRef.current;
+    if (!root || !header || !header.querySelector('div.fg')) return;
     let fitted: number;
     try {
-      fitted = squeezeFg(header);
+      fitted = squeezeFg(header, 0.98);
     } catch {
       return;
     }
     // Bounded above by the body font: squeezeFg happily grows text to fill a
     // wide column, which at a few columns looks like a headline, not a table.
+    // The bound is the raw body font -- 0.98 is breathing room for a fitted
+    // size, not something to shave off the default.
     const target = Math.min(fitted, parseFloat(getComputedStyle(document.body).fontSize));
-    root.querySelectorAll<HTMLElement>('div.fg').forEach(el => {
-      el.style.fontSize = `${target}px`;
+    // One size on the root, inherited by every cell, rather than written
+    // onto each .fg in turn: that is what lets an appended block come out at
+    // the right size having measured nothing, so paging never refits. The
+    // header's own cells carry the inline size squeezeFg just set, so they
+    // have to be cleared back to inheriting or they would keep `fitted`
+    // even where the clamp lowered it.
+    root.style.fontSize = `${target}px`;
+    header.querySelectorAll<HTMLElement>('div.fg').forEach(el => {
+      el.style.fontSize = '';
     });
-  }, [dark, lit, table, strataOrder, valuesOrder, filters, visible.length]);
+  }, []);
+
+  // The header's own geometry only changes with the column set, so that --
+  // and the window resizing under it -- is the whole trigger list. Notably
+  // not the selection, the mode, or an appended block, none of which move a
+  // single cell edge.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    fitFont();
+    const observer = new ResizeObserver(fitFont);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [fitFont, table, strataOrder, valuesOrder]);
 
   function handleScroll() {
     const body = bodyRef.current;
@@ -273,28 +327,31 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
     }
   }
 
+  // Horizontal scrolling lives on the root, not on a wrapper box around
+  // header and body: they share a minimum width, so scrolling their common
+  // ancestor keeps them in lockstep with no position syncing, and it leaves
+  // them as direct .bg children of a .bg parent -- which is what makes the
+  // 1px gap between them fall out of styles.css for free, exactly like
+  // every other gap in the table.
   return (
     <div
       ref={rootRef}
       className="bg"
-      style={{ flexDirection: 'column', width: '100vw', height: '100vh', color: dark ? '#fff' : '#000' }}
+      style={{
+        flexDirection: 'column', width: '100vw', height: '100vh',
+        overflowX: 'auto', color: dark ? '#fff' : '#000',
+      }}
     >
-      {/* One scroll box for header and body together: they share a minimum
-          width, so they scroll in lockstep with no position syncing. */}
-      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflowX: 'auto' }}>
-        <div ref={headerRef} className="bg" style={{ flexDirection: 'column', flexShrink: 0, minWidth: minTableWidth }}>
-          {renderHeader(strata)}
-        </div>
-        <div
-          ref={bodyRef}
-          className="bg"
-          style={{ flex: 1, flexDirection: 'column', overflowY: 'auto', minWidth: minTableWidth }}
-          onScroll={handleScroll}
-        >
-          {visible.length === 0
-            ? <div style={{ padding: 16, opacity: 0.5 }}>no rows</div>
-            : renderBody(visible, strata)}
-        </div>
+      {renderHeader(strata, true)}
+      <div
+        ref={bodyRef}
+        className="bg"
+        style={{ flex: 1, flexDirection: 'column', overflowY: 'auto', minWidth: minTableWidth }}
+        onScroll={handleScroll}
+      >
+        {batches.length === 0
+          ? <div style={{ opacity: 0.5 }}>no rows</div>
+          : batches.map((batch, i) => <Fragment key={i}>{renderBody(batch, strata)}</Fragment>)}
       </div>
 
       <div style={{ position: 'fixed', bottom: 12, left: 12, display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -302,7 +359,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
           ← diagram
         </button>
         <span style={{ fontSize: 12, opacity: 0.6 }}>
-          {labelOf(table.name)} · {visible.length} of {rows.length}
+          {labelOf(table.name)} · {shown} of {rows.length}
           {rows.length !== table.rowCount ? ` (filtered from ${table.rowCount})` : ''}
         </span>
       </div>

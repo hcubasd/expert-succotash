@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { squeezeFg } from 'psychic-potato';
 import { LUMINANCE_DARK, LUMINANCE_LIGHT, grayAt, ngon, randomRotation, rgbStr } from '../lib/colors';
-import { EDGES, NODES, labelOf } from './diagramLayout';
+import { EDGES, NODES, POSITIONS, labelOf } from './diagramLayout';
 import type { TableName } from '../lib/schema';
 
 type Props = {
@@ -23,52 +23,34 @@ const Spacer = ({ weight }: { weight: number }) => <div style={{ flex: weight }}
 const CARD_WEIGHT = 2;
 const GAP_WEIGHT = 1;
 
-const UNLOADED_LIGHTNESS = { dark: 0.28, light: 0.78 };
+// Which hue lands at slot 0 varies session to session, purely for visual
+// variety -- POSITIONS (the slot *each node* draws from) is what actually
+// matters for readability, and that's fixed data, solved once offline. This
+// has to be a module-level constant, not component state: it should survive
+// navigating away from and back to the diagram view within one page load,
+// only reshuffling on an actual reload.
+const ROTATION = randomRotation();
 
 export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack, onClearAll }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const nodeRefs = useRef<Map<TableName, HTMLDivElement>>(new Map());
   const [edges, setEdges] = useState<Edge[]>([]);
 
-  // The diagram owns its own palette: nothing outside it needs to know which
-  // card got which hue. One rotation for the session, colors handed out as
-  // files arrive so the set of used hues always matches what's loaded.
-  const [rotation] = useState(randomRotation);
   const luminance = dark ? LUMINANCE_DARK : LUMINANCE_LIGHT;
-  const palette = useMemo(() => ngon(NODES.length, rotation, luminance), [rotation, luminance]);
-  // Which palette index each loaded table drew -- not the resolved color.
-  // Storing the index is what lets a dark/light toggle repaint every
-  // already-assigned card at the new luminance for free: the index stays
-  // put, palette[index] just points at a different point on the new circle.
-  const [nodeIndices, setNodeIndices] = useState<Map<TableName, number>>(new Map());
+  const palette = useMemo(() => ngon(NODES.length, ROTATION, luminance), [luminance]);
 
-  useEffect(() => {
-    setNodeIndices(previous => {
-      let next: Map<TableName, number> | null = null;
-      for (const id of loaded) {
-        if (previous.has(id)) continue;
-        const used = new Set((next ?? previous).values());
-        const free: number[] = [];
-        for (let i = 0; i < palette.length; i++) if (!used.has(i)) free.push(i);
-        if (free.length === 0) break;
-        next = next ?? new Map(previous);
-        next.set(id, free[Math.floor(Math.random() * free.length)]);
-      }
-      // Drop indices for anything no longer loaded, so a cleared file frees
-      // its hue back to the palette.
-      for (const id of previous.keys()) {
-        if (!loaded.has(id)) {
-          next = next ?? new Map(previous);
-          next.delete(id);
-        }
-      }
-      return next ?? previous;
-    });
-  }, [loaded, palette]);
+  // Unloaded cards sit at the same luminance as loaded ones, so the two
+  // read as one consistent surface rather than the blanks looking like a
+  // different kind of thing.
+  const blank = useMemo(() => grayAt(luminance), [luminance]);
 
-  const blank = useMemo(
-    () => grayAt(dark ? UNLOADED_LIGHTNESS.dark : UNLOADED_LIGHTNESS.light),
-    [dark],
+  // Every card's slot is a fixed lookup now (POSITIONS), not something
+  // assigned as files load -- so there's no state, and no "different
+  // arrangement on every mount" bug left to have. Only whether it's loaded
+  // still varies, which is what picks real color vs. the neutral blank.
+  const colorOf = useCallback(
+    (id: TableName) => rgbStr(loaded.has(id) ? palette[POSITIONS[id]] : blank),
+    [loaded, palette, blank],
   );
 
   const columns = useMemo(() => {
@@ -82,14 +64,6 @@ export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack,
       .sort(([a], [b]) => a - b)
       .map(([, list]) => list.sort((a, b) => a.order - b.order));
   }, []);
-
-  const colorOf = useCallback(
-    (id: TableName) => {
-      const index = nodeIndices.get(id);
-      return rgbStr(index !== undefined ? palette[index] : blank);
-    },
-    [nodeIndices, palette, blank],
-  );
 
   const measureEdges = useCallback(() => {
     const container = containerRef.current;
@@ -118,7 +92,7 @@ export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack,
     if (!container) return;
     const fit = () => {
       try {
-        squeezeFg(container);
+        squeezeFg(container, 0.98);
       } catch {
         // nothing measurable yet
       }
@@ -173,41 +147,47 @@ export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack,
         <Fragment key={ci}>
           {ci > 0 && <Spacer weight={GAP_WEIGHT} />}
           <div style={{ display: 'flex', flexDirection: 'column', flex: CARD_WEIGHT, minWidth: 0 }}>
-            <Spacer weight={GAP_WEIGHT} />
-            {nodes.map((node, ni) => {
-              const index = nodeIndices.get(node.id);
-              const color = index !== undefined ? palette[index] : undefined;
-              return (
-                <Fragment key={node.id}>
-                  {ni > 0 && <Spacer weight={GAP_WEIGHT} />}
-                  <div style={{ display: 'flex', flex: CARD_WEIGHT, alignItems: 'center', minWidth: 0 }}>
-                    <div
-                      ref={el => {
-                        if (el) nodeRefs.current.set(node.id, el);
-                        else nodeRefs.current.delete(node.id);
-                      }}
-                      className="bg"
-                      style={{
-                        flex: 1,
-                        alignSelf: 'stretch',
-                        cursor: 'pointer',
-                        position: 'relative',
-                        zIndex: 1,
-                        backgroundColor: rgbStr(color ?? blank),
-                        // Black on a real palette color; on the neutral card
-                        // the readable choice is whatever contrasts with the
-                        // gray, which is the opposite of the page's ink.
-                        color: color ? '#000' : dark ? '#fff' : '#000',
-                      }}
-                      onClick={() => handleClick(node.id)}
-                    >
-                      <div className="fg">{labelOf(node.id)}</div>
-                    </div>
+            {/* Vertically, every slot -- gap or card -- is flex:1. Only the
+                horizontal column/gap ratio uses CARD_WEIGHT/GAP_WEIGHT. */}
+            <Spacer weight={1} />
+            {nodes.map((node, ni) => (
+              <Fragment key={node.id}>
+                {ni > 0 && <Spacer weight={1} />}
+                <div style={{ display: 'flex', flex: 1, alignItems: 'center', minWidth: 0 }}>
+                  <div
+                    ref={el => {
+                      if (el) nodeRefs.current.set(node.id, el);
+                      else nodeRefs.current.delete(node.id);
+                    }}
+                    className="bg"
+                    style={{
+                      // flex:1 sizes the width (the wrapper is row-direction);
+                      // height stays auto, so it's the label plus this padding
+                      // and nothing else. Deliberately NOT alignSelf:stretch --
+                      // the wrapper's alignItems:center then centers this box
+                      // in its slot, and since squeezeFg gives every label one
+                      // shared font size, every card in every column ends up
+                      // exactly the same height.
+                      flex: 1,
+                      padding: '1em 0',
+                      cursor: 'pointer',
+                      position: 'relative',
+                      zIndex: 1,
+                      backgroundColor: colorOf(node.id),
+                      // Both real palette colors and the neutral blank now
+                      // draw at the same luminance, so one rule covers both:
+                      // dark mode's bright swatches read best with black
+                      // text, light mode's darker ones with white.
+                      color: dark ? '#000' : '#fff',
+                    }}
+                    onClick={() => handleClick(node.id)}
+                  >
+                    <div className="fg">{labelOf(node.id)}</div>
                   </div>
-                </Fragment>
-              );
-            })}
-            <Spacer weight={GAP_WEIGHT} />
+                </div>
+              </Fragment>
+            ))}
+            <Spacer weight={1} />
           </div>
         </Fragment>
       ))}

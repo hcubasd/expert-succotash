@@ -26,8 +26,6 @@ type View =
 // column the map knows nothing about simply returns the map to monochrome.
 type ActiveColumn = { table: TableName; column: string };
 
-const INK = { dark: { r: 255, g: 255, b: 255 }, light: { r: 0, g: 0, b: 0 } };
-const PAPER = { dark: { r: 0, g: 0, b: 0 }, light: { r: 255, g: 255, b: 255 } };
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: 'map' });
@@ -58,14 +56,7 @@ export default function App() {
       selection: ActiveColumn | null,
       isDark: boolean,
     ) => {
-      applyMapColors(
-        nextGeometries,
-        nextTables,
-        selection,
-        isDark ? INK.dark : INK.light,
-        isDark ? PAPER.dark : PAPER.light,
-        isDark,
-      );
+      applyMapColors(nextGeometries, nextTables, selection, isDark);
       setColorVersion(v => v + 1);
     },
     [],

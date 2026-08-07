@@ -3,6 +3,7 @@ import { MapRenderer } from '../gl/renderer';
 import type { View } from '../gl/renderer';
 import { LUMINANCE_DARK, LUMINANCE_LIGHT } from '../lib/colors';
 import type { Bounds, Geometries } from '../lib/geometryMaker';
+import { paperOf } from '../lib/mapColors';
 
 type Props = {
   dark: boolean;
@@ -50,7 +51,11 @@ export default function Map({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<MapRenderer | null>(null);
   const viewRef = useRef<View>({ centerX: 0, centerY: 0, scaleX: 1, scaleY: 1 });
-  const [size, setSize] = useState({ width: 0, height: 0 });
+  // width/height are the backing store's device pixels; ratio is recorded
+  // alongside them by the same measurement that set them, so anything sized
+  // in CSS pixels converts against the ratio the canvas was actually built
+  // with rather than whatever window.devicePixelRatio reads at draw time.
+  const [size, setSize] = useState({ width: 0, height: 0, ratio: 1 });
   const [drag, setDrag] = useState<Drag | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   // Only used to force a redraw after an interaction; the view itself lives
@@ -58,7 +63,14 @@ export default function Map({
   const [, setTick] = useState(0);
   const redraw = useCallback(() => setTick(t => t + 1), []);
 
-  useEffect(() => {
+  // These four run as layout effects, in this declaration order, and that
+  // order is load-bearing: create the context, size the canvas, fit the
+  // view, then draw -- all within one commit, before the browser paints.
+  // Creation used to be a passive effect while the draw was a layout one,
+  // which meant the draw always ran first and found a null renderer, so the
+  // mount commit painted nothing and the picture only appeared once some
+  // later render happened to come along.
+  useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     try {
@@ -73,14 +85,6 @@ export default function Map({
     };
   }, []);
 
-  // Positions never change once loaded, but the buffers are keyed per
-  // geometry object -- a reloaded file means new arrays and a new upload.
-  useEffect(() => {
-    rendererRef.current?.invalidate();
-    viewRef.current = fitView(bounds, size.width, size.height);
-    redraw();
-  }, [geometries, bounds, size.width, size.height, redraw]);
-
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -90,7 +94,7 @@ export default function Map({
       const height = Math.max(1, Math.floor(canvas.clientHeight * ratio));
       canvas.width = width;
       canvas.height = height;
-      setSize({ width, height });
+      setSize({ width, height, ratio });
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -98,12 +102,21 @@ export default function Map({
     return () => observer.disconnect();
   }, []);
 
+  // Positions never change once loaded, but the buffers are keyed per
+  // geometry object -- a reloaded file means new arrays and a new upload.
+  useLayoutEffect(() => {
+    rendererRef.current?.invalidate();
+    viewRef.current = fitView(bounds, size.width, size.height);
+    redraw();
+  }, [geometries, bounds, size.width, size.height, redraw]);
+
   useLayoutEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer || size.width === 0) return;
-    const paper = dark ? { r: 0, g: 0, b: 0 } : { r: 255, g: 255, b: 255 };
     renderer.setLuminance(dark ? LUMINANCE_DARK : LUMINANCE_LIGHT);
-    renderer.render(geometries, viewRef.current, paper, lineLayer, blendDesireLines, colorVersion);
+    renderer.render(
+      geometries, viewRef.current, paperOf(dark), lineLayer, blendDesireLines, colorVersion, size.ratio,
+    );
   });
 
   // Scrolling pans. Zoom stays on the drag-rectangle gesture, so the wheel is
@@ -114,28 +127,26 @@ export default function Map({
     if (!canvas) return;
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      const ratio = window.devicePixelRatio || 1;
       const scale = pixelsPerUnit(viewRef.current, size.width);
       if (scale <= 0) return;
       viewRef.current = {
         ...viewRef.current,
-        centerX: viewRef.current.centerX + (event.deltaX * ratio) / scale,
-        centerY: viewRef.current.centerY - (event.deltaY * ratio) / scale,
+        centerX: viewRef.current.centerX + (event.deltaX * size.ratio) / scale,
+        centerY: viewRef.current.centerY - (event.deltaY * size.ratio) / scale,
       };
       redraw();
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, [size.width, redraw]);
+  }, [size.width, size.ratio, redraw]);
 
   function toWorld(clientX: number, clientY: number) {
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
-    const ratio = window.devicePixelRatio || 1;
     const view = viewRef.current;
     const scale = pixelsPerUnit(view, size.width);
-    const px = (clientX - rect.left) * ratio - size.width / 2;
-    const py = (clientY - rect.top) * ratio - size.height / 2;
+    const px = (clientX - rect.left) * size.ratio - size.width / 2;
+    const py = (clientY - rect.top) * size.ratio - size.height / 2;
     // Screen y grows downward, world y upward.
     return { x: view.centerX + px / scale, y: view.centerY - py / scale };
   }

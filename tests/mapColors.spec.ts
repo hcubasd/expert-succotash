@@ -6,8 +6,11 @@ import { MAP_DRIVERS, activeLineLayer, applyMapColors, desireLinesAreColored, ta
 import type { RawGeometry } from '../src/lib/rawTable';
 import { makeTable } from '../src/lib/tableMaker';
 
-const INK = { r: 255, g: 255, b: 255 };
-const PAPER = { r: 0, g: 0, b: 0 };
+// Every case below runs in dark mode, so ink is white and paper is black --
+// which is what makes "fell back to ink" and "fell back to paper" tellable
+// apart in the assertions.
+const INK = [255, 255, 255];
+const PAPER = [0, 0, 0];
 
 const line = (coords: [number, number][]): RawGeometry => ({ type: 'LineString', coordinates: coords });
 const point = (x: number, y: number): RawGeometry => ({ type: 'Point', coordinates: [x, y] });
@@ -38,44 +41,55 @@ afterEach(() => {
 });
 
 describe('applyMapColors', () => {
-  it('paints everything in the ink color when nothing is selected', () => {
+  it('defaults the lines to ink and the agents to paper when nothing is selected', () => {
     const geometries = scene();
-    applyMapColors(geometries, {}, null, INK, PAPER, false);
-    expect(Array.from(geometries.network!.colors.slice(0, 3))).toEqual([255, 255, 255]);
-    expect(Array.from(geometries.agents!.colors.slice(0, 3))).toEqual([255, 255, 255]);
+    applyMapColors(geometries, {}, null, true);
+    expect(Array.from(geometries.network!.colors.slice(0, 3))).toEqual(INK);
+    expect(Array.from(geometries.desireLines!.colors.slice(0, 3))).toEqual(INK);
+    // Agents sit on top of everything, so they take the background color
+    // rather than opposing it.
+    expect(Array.from(geometries.agents!.colors.slice(0, 3))).toEqual(PAPER);
   });
 
   it('stays monochrome for a column the map has no registered meaning for', () => {
     const geometries = scene();
-    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER, false);
-    expect(Array.from(geometries.network!.colors.slice(0, 3))).toEqual([255, 255, 255]);
+    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, true);
+    expect(Array.from(geometries.network!.colors.slice(0, 3))).toEqual(INK);
   });
 
   it('colors a bucket once its column is registered, distinctly per stratum value', () => {
     MAP_DRIVERS.network = { road_type: 'network' };
     const geometries = scene();
-    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER, false);
+    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, true);
 
     const first = Array.from(geometries.network!.colors.slice(0, 3));
     const second = Array.from(geometries.network!.colors.slice(6, 9));
-    expect(first).not.toEqual([255, 255, 255]);
+    expect(first).not.toEqual(INK);
     // two links, two road types -- so the two segments must differ
     expect(first).not.toEqual(second);
   });
 
-  it('leaves other buckets monochrome when only one is driven', () => {
+  it('leaves other buckets at their defaults when only one is driven', () => {
     MAP_DRIVERS.network = { road_type: 'network' };
     const geometries = scene();
-    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER, false);
-    expect(Array.from(geometries.agents!.colors.slice(0, 3))).toEqual([255, 255, 255]);
+    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, true);
+    expect(Array.from(geometries.agents!.colors.slice(0, 3))).toEqual(PAPER);
+    expect(Array.from(geometries.desireLines!.colors.slice(0, 3))).toEqual(INK);
   });
 
   it('gives both vertices of a segment the same color, so a line is never a gradient', () => {
     MAP_DRIVERS.network = { road_type: 'network' };
     const geometries = scene();
-    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, INK, PAPER, false);
+    applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, true);
     expect(Array.from(geometries.network!.colors.slice(0, 3)))
       .toEqual(Array.from(geometries.network!.colors.slice(3, 6)));
+  });
+
+  it('flips ink and paper with the mode, so light mode is the mirror', () => {
+    const geometries = scene();
+    applyMapColors(geometries, {}, null, false);
+    expect(Array.from(geometries.network!.colors.slice(0, 3))).toEqual(PAPER);
+    expect(Array.from(geometries.agents!.colors.slice(0, 3))).toEqual(INK);
   });
 });
 
@@ -111,10 +125,10 @@ describe('the anyStratum wildcard (agents)', () => {
 
   it('colors agents distinctly per zone_id end to end', () => {
     const geometries = scene();
-    applyMapColors(geometries, { agents: agentsTable }, { table: 'agents', column: 'zone_id' }, INK, PAPER, false);
+    applyMapColors(geometries, { agents: agentsTable }, { table: 'agents', column: 'zone_id' }, true);
     const first = Array.from(geometries.agents!.colors.slice(0, 3));
     const second = Array.from(geometries.agents!.colors.slice(3, 6));
-    expect(first).not.toEqual([255, 255, 255]);
+    expect(first).not.toEqual(PAPER);
     expect(first).not.toEqual(second);
   });
 });

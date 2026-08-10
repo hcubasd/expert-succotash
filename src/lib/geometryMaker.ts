@@ -67,6 +67,11 @@ export function originOf(bounds: Bounds): Origin {
   return { x: (bounds.minX + bounds.maxX) / 2, y: (bounds.minY + bounds.maxY) / 2 };
 }
 
+// minX, minY, maxX, maxY per row. What lets a view decide which features are
+// on screen without touching their geometry again -- the ramps are equalized
+// over what's visible, so this is read on every zoom.
+export type RowBounds = Float32Array;
+
 export type PolygonGeometry = {
   rowCount: number;
   // Triangulated interiors, every polygon in one buffer: x,y interleaved.
@@ -79,6 +84,7 @@ export type PolygonGeometry = {
   // Per segment, not per vertex -- see SegmentGeometry.
   borderRowIndex: Uint32Array;
   borderColors: Uint8Array;
+  rowBounds: RowBounds;
 };
 
 export type SegmentGeometry = {
@@ -92,11 +98,19 @@ export type SegmentGeometry = {
   // vary along a line even in principle.
   rowIndex: Uint32Array;
   colors: Uint8Array;
-  // Wheel index per segment, for the hue-averaging blend path. Kept
-  // alongside rgb rather than instead of it because the two render paths
-  // want different things: opaque drawing wants color, accumulation wants
-  // an angle.
-  hues: Uint8Array;
+  rowBounds: RowBounds;
+};
+
+// Desire lines, collapsed per resource. A->B and B->A are the same flow seen
+// from two ends, so they fold into one edge with their quantities summed --
+// and since a coordinate pair identifies an agent pair exactly (agent
+// positions are unique, verified across both real datasets), this needs
+// nothing but the desire-lines file itself: no agent ids, no join.
+export type EdgeGeometry = {
+  // x1,y1,x2,y2 per edge, same layout the segment buffers use.
+  positions: Float32Array;
+  // One summed quantity per edge; the GPU accumulates these per pixel.
+  quantities: Float32Array;
 };
 
 export type PointGeometry = {
@@ -108,12 +122,37 @@ export type PointGeometry = {
 export type Geometries = {
   zones: PolygonGeometry | null;
   network: SegmentGeometry | null;
-  desireLines: SegmentGeometry | null;
+  // Keyed by resource: only ever one is drawn at a time, and each is already
+  // collapsed and summed, so switching resource is a lookup rather than a
+  // rebuild.
+  desireLines: Map<string, EdgeGeometry> | null;
   agents: PointGeometry | null;
 };
 
 export function emptyGeometries(): Geometries {
   return { zones: null, network: null, desireLines: null, agents: null };
+}
+
+function boundsPerRow(rowCount: number, elements: number, rowIndex: Uint32Array, read: (element: number, corner: number) => [number, number]): RowBounds {
+  const out = new Float32Array(rowCount * 4);
+  for (let row = 0; row < rowCount; row++) {
+    out[row * 4] = Infinity;
+    out[row * 4 + 1] = Infinity;
+    out[row * 4 + 2] = -Infinity;
+    out[row * 4 + 3] = -Infinity;
+  }
+  for (let element = 0; element < elements; element++) {
+    const row = rowIndex[element];
+    for (let corner = 0; corner < 2; corner++) {
+      const [x, y] = read(element, corner);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (x < out[row * 4]) out[row * 4] = x;
+      if (y < out[row * 4 + 1]) out[row * 4 + 1] = y;
+      if (x > out[row * 4 + 2]) out[row * 4 + 2] = x;
+      if (y > out[row * 4 + 3]) out[row * 4 + 3] = y;
+    }
+  }
+  return out;
 }
 
 // One row's worth of polygon parts -- a plain Polygon is one part, a
@@ -160,14 +199,24 @@ export function makePolygons(geometries: RawGeometry[], origin: Origin): Polygon
     }
   });
 
+  const fillPositions = new Float32Array(fill);
+  const fillRowIndex = new Uint32Array(fillRow);
   return {
     rowCount: geometries.length,
-    fillPositions: new Float32Array(fill),
-    fillRowIndex: new Uint32Array(fillRow),
+    fillPositions,
+    fillRowIndex,
     fillColors: new Uint8Array((fill.length / 2) * 3),
     borderPositions: new Float32Array(border),
     borderRowIndex: new Uint32Array(borderRow),
     borderColors: new Uint8Array((border.length / 4) * 3),
+    // Measured off the fill triangles: they cover the polygon's interior, so
+    // their extent is the row's extent, and the border traces the same rings.
+    rowBounds: boundsPerRow(
+      geometries.length,
+      fillPositions.length / 2,
+      fillRowIndex,
+      (vertex) => [fillPositions[vertex * 2], fillPositions[vertex * 2 + 1]],
+    ),
   };
 }
 
@@ -195,13 +244,80 @@ export function makeSegments(geometries: RawGeometry[], origin: Origin): Segment
   });
 
   const segmentCount = positions.length / 4;
+  const flat = new Float32Array(positions);
+  const rows = new Uint32Array(rowIndex);
   return {
     rowCount: geometries.length,
-    positions: new Float32Array(positions),
-    rowIndex: new Uint32Array(rowIndex),
+    positions: flat,
+    rowIndex: rows,
     colors: new Uint8Array(segmentCount * 3),
-    hues: new Uint8Array(segmentCount),
+    rowBounds: boundsPerRow(
+      geometries.length,
+      segmentCount,
+      rows,
+      (segment, corner) => [flat[segment * 4 + corner * 2], flat[segment * 4 + corner * 2 + 1]],
+    ),
   };
+}
+
+// Collapse a resource's desire lines into unique undirected edges. The key is
+// the coordinate pair itself rather than an agent id pair: agent positions
+// are unique, and a line's endpoints are exactly an agent's coordinates, so
+// the two are equivalent -- checked against both the synthetic fixture and a
+// whole-country dataset, identical edge counts for every resource.
+export function makeDesireLineEdges(
+  geometries: RawGeometry[],
+  resources: string[],
+  quantities: Float64Array,
+  origin: Origin,
+): Map<string, EdgeGeometry> {
+  type Edge = { x1: number; y1: number; x2: number; y2: number; quantity: number };
+  const byResource = new Map<string, Map<string, Edge>>();
+
+  geometries.forEach((geometry, row) => {
+    const spans = lineStrings(geometry);
+    if (spans.length === 0) return;
+    const coords = spans[0];
+    if (coords.length < 2) return;
+
+    const [x1, y1] = coords[0];
+    const [x2, y2] = coords[coords.length - 1];
+    const quantity = quantities[row];
+    if (!Number.isFinite(quantity)) return;
+
+    const resource = resources[row];
+    let edges = byResource.get(resource);
+    if (!edges) {
+      edges = new Map<string, Edge>();
+      byResource.set(resource, edges);
+    }
+
+    // Order-independent key, so A->B and B->A land on the same entry.
+    const a = `${x1},${y1}`;
+    const b = `${x2},${y2}`;
+    const key = a <= b ? `${a}|${b}` : `${b}|${a}`;
+
+    const existing = edges.get(key);
+    if (existing) existing.quantity += quantity;
+    else edges.set(key, { x1, y1, x2, y2, quantity });
+  });
+
+  const out = new Map<string, EdgeGeometry>();
+  for (const [resource, edges] of byResource) {
+    const positions = new Float32Array(edges.size * 4);
+    const quantityOf = new Float32Array(edges.size);
+    let i = 0;
+    for (const edge of edges.values()) {
+      positions[i * 4] = edge.x1 - origin.x;
+      positions[i * 4 + 1] = edge.y1 - origin.y;
+      positions[i * 4 + 2] = edge.x2 - origin.x;
+      positions[i * 4 + 3] = edge.y2 - origin.y;
+      quantityOf[i] = edge.quantity;
+      i++;
+    }
+    out.set(resource, { positions, quantities: quantityOf });
+  }
+  return out;
 }
 
 export function makePoints(geometries: RawGeometry[], origin: Origin): PointGeometry {
@@ -252,8 +368,10 @@ export function boundsOf(geometries: Geometries): Bounds | null {
   if (geometries.zones) scan(geometries.zones.fillPositions);
   if (geometries.zones) scan(geometries.zones.borderPositions);
   if (geometries.network) scan(geometries.network.positions);
-  if (geometries.desireLines) scan(geometries.desireLines.positions);
   if (geometries.agents) scan(geometries.agents.positions);
+  if (geometries.desireLines) {
+    for (const edges of geometries.desireLines.values()) scan(edges.positions);
+  }
 
   if (minX > maxX || minY > maxY) return null;
   return { minX, minY, maxX, maxY };

@@ -1,11 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { squeezeFg } from 'psychic-potato';
-import { LUMINANCE_DARK, LUMINANCE_LIGHT, grayAt, ngon, randomRotation, rgbStr } from '../lib/colors';
+import { LUMINANCE, grayAt, ngon, randomRotation, rgbStr } from '../lib/colors';
 import { EDGES, NODES, POSITIONS, labelOf } from './diagramLayout';
 import type { TableName } from '../lib/schema';
 
 type Props = {
-  dark: boolean;
   loaded: Set<TableName>;
   onOpenTable: (table: TableName) => void;
   onPickFile: (table: TableName) => void;
@@ -31,18 +30,17 @@ const GAP_WEIGHT = 1;
 // only reshuffling on an actual reload.
 const ROTATION = randomRotation();
 
-export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack, onClearAll }: Props) {
+export default function Diagram({ loaded, onOpenTable, onPickFile, onBack, onClearAll }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const nodeRefs = useRef<Map<TableName, HTMLDivElement>>(new Map());
   const [edges, setEdges] = useState<Edge[]>([]);
 
-  const luminance = dark ? LUMINANCE_DARK : LUMINANCE_LIGHT;
-  const palette = useMemo(() => ngon(NODES.length, ROTATION, luminance), [luminance]);
+  const palette = useMemo(() => ngon(NODES.length, ROTATION), []);
 
   // Unloaded cards sit at the same luminance as loaded ones, so the two
   // read as one consistent surface rather than the blanks looking like a
   // different kind of thing.
-  const blank = useMemo(() => grayAt(luminance), [luminance]);
+  const blank = useMemo(() => grayAt(LUMINANCE), []);
 
   // Every card's slot is a fixed lookup now (POSITIONS), not something
   // assigned as files load -- so there's no state, and no "different
@@ -122,8 +120,8 @@ export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack,
         width: '100vw',
         height: '100vh',
         position: 'relative',
-        backgroundColor: dark ? '#000' : '#fff',
-        color: dark ? '#fff' : '#000',
+        backgroundColor: '#fff',
+        color: '#000',
       }}
     >
       {/* Edges sit behind the cards, which are lifted to z-index 1. */}
@@ -174,11 +172,10 @@ export default function Diagram({ dark, loaded, onOpenTable, onPickFile, onBack,
                       position: 'relative',
                       zIndex: 1,
                       backgroundColor: colorOf(node.id),
-                      // Both real palette colors and the neutral blank now
-                      // draw at the same luminance, so one rule covers both:
-                      // dark mode's bright swatches read best with black
-                      // text, light mode's darker ones with white.
-                      color: dark ? '#000' : '#fff',
+                      // Palette colors and the neutral blank both draw at
+                      // the one palette luminance, which is bright, so black
+                      // is the readable ink over either.
+                      color: '#000',
                     }}
                     onClick={() => handleClick(node.id)}
                   >

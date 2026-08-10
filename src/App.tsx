@@ -5,10 +5,12 @@ import Table from './components/Table';
 import { loadCsv } from './lib/csvLoader';
 import { loadGpkg } from './lib/gpkgLoader';
 import {
-  boundsOf, emptyGeometries, makePoints, makePolygons, makeSegments, originOf, rawBounds,
+  boundsOf, emptyGeometries, makeDesireLineEdges, makePoints, makePolygons, makeSegments,
+  originOf, rawBounds,
 } from './lib/geometryMaker';
 import type { Bounds, Geometries, Origin } from './lib/geometryMaker';
-import { activeLineLayer, applyMapColors, desireLinesAreColored } from './lib/mapColors';
+import { stratumValues, valueNumbers } from './lib/mapValues';
+import type { Draft } from './lib/mapValues';
 import type { RawGeometry, RawTable } from './lib/rawTable';
 import { FILENAME } from './lib/schema';
 import type { TableName } from './lib/schema';
@@ -20,59 +22,28 @@ type View =
   | { kind: 'diagram' }
   | { kind: 'table'; table: TableName };
 
-// Which column is lit, app-wide. Table uses it to highlight its own header;
-// the map checks it against its own registry and colors accordingly. One
-// piece of state, two readers with different interpretations -- clicking a
-// column the map knows nothing about simply returns the map to monochrome.
+// Which column is lit in the table view. Purely a table concern now -- the
+// map has its own explicit selection, because "whichever column happens to
+// be clicked" was never expressive enough to say things like "supply of
+// pallets, joined onto zones".
 type ActiveColumn = { table: TableName; column: string };
-
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: 'map' });
-  const [dark, setDark] = useState(false);
   const [tables, setTables] = useState<Partial<Record<TableName, TableData>>>({});
   const [activeColumn, setActiveColumn] = useState<ActiveColumn | null>(null);
   const [geometries, setGeometries] = useState<Geometries>(emptyGeometries);
   const [bounds, setBounds] = useState<Bounds | null>(null);
-  const [colorVersion, setColorVersion] = useState(0);
+  const [draft, setDraft] = useState<Draft>({ mode: null });
 
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingTable = useRef<TableName | null>(null);
   // Fixed by whichever geometry file arrives first and reused by every file
-  // after it, so all four buckets share one frame. See geometryMaker: this is
-  // what keeps float32 vertex buffers precise for real projected coordinates.
+  // after it, so all buckets share one frame. See geometryMaker: this is what
+  // keeps float32 vertex buffers precise for real projected coordinates.
   const originRef = useRef<Origin | null>(null);
 
   const loaded = useMemo(() => new Set(Object.keys(tables) as TableName[]), [tables]);
-
-  // Colors are written straight into the geometry buffers rather than passed
-  // to the map as props: the map's job is to draw what it's given, and these
-  // arrays are large enough that copying them per selection would be wasted
-  // work. colorVersion is what tells the map they changed underneath it.
-  const repaint = useCallback(
-    (
-      nextGeometries: Geometries,
-      nextTables: Partial<Record<TableName, TableData>>,
-      selection: ActiveColumn | null,
-      isDark: boolean,
-    ) => {
-      applyMapColors(nextGeometries, nextTables, selection, isDark);
-      setColorVersion(v => v + 1);
-    },
-    [],
-  );
-
-  const selectColumn = useCallback(
-    (table: TableName, column: string) => {
-      const next =
-        activeColumn && activeColumn.table === table && activeColumn.column === column
-          ? null
-          : { table, column };
-      setActiveColumn(next);
-      repaint(geometries, tables, next, dark);
-    },
-    [activeColumn, geometries, tables, dark, repaint],
-  );
 
   const ingest = useCallback(
     async (target: TableName, file: File) => {
@@ -91,33 +62,38 @@ export default function App() {
       const nextTables = { ...tables, [target]: table };
 
       // Geometry is rebuilt only for the four tables that carry any. The
-      // expensive part -- triangulating polygons, decomposing polylines into
-      // segments, flattening coordinates -- happens here, once, so mounting
-      // the map later is only a buffer upload.
+      // expensive part -- triangulating polygons, decomposing polylines,
+      // collapsing desire lines per resource -- happens here, once, so
+      // mounting the map later is only a buffer upload.
       const nextGeometries: Geometries = { ...geometries };
       if (rawGeometries) {
         if (!originRef.current) {
-          const raw = rawBounds(rawGeometries);
-          if (raw) originRef.current = originOf(raw);
+          const bounds = rawBounds(rawGeometries);
+          if (bounds) originRef.current = originOf(bounds);
         }
         const origin = originRef.current ?? { x: 0, y: 0 };
         if (target === 'zones') nextGeometries.zones = makePolygons(rawGeometries, origin);
         else if (target === 'agents') nextGeometries.agents = makePoints(rawGeometries, origin);
         else if (target === 'network') nextGeometries.network = makeSegments(rawGeometries, origin);
-        else if (target === 'desire_lines') nextGeometries.desireLines = makeSegments(rawGeometries, origin);
+        else if (target === 'desire_lines') {
+          const resources = stratumValues(table, 'resource');
+          const quantities = valueNumbers(table, 'quantity');
+          nextGeometries.desireLines = resources && quantities
+            ? makeDesireLineEdges(rawGeometries, resources, quantities, origin)
+            : null;
+        }
       }
 
-      // A replaced file may not even have the column that was driving the
-      // map, so the selection can't survive it.
+      // A replaced file may not have the column that was driving the table
+      // highlight, so the selection can't survive it.
       const nextSelection = activeColumn?.table === target ? null : activeColumn;
 
-      repaint(nextGeometries, nextTables, nextSelection, dark);
       setTables(nextTables);
       setGeometries(nextGeometries);
       setBounds(boundsOf(nextGeometries));
       setActiveColumn(nextSelection);
     },
-    [tables, geometries, activeColumn, dark, repaint],
+    [tables, geometries, activeColumn],
   );
 
   function pickFile(target: TableName) {
@@ -141,13 +117,13 @@ export default function App() {
     setGeometries(emptyGeometries());
     setBounds(null);
     setActiveColumn(null);
-    setColorVersion(v => v + 1);
+    setDraft({ mode: null });
   }
 
-  function toggleDark() {
-    const next = !dark;
-    setDark(next);
-    repaint(geometries, tables, activeColumn, next);
+  function selectColumn(table: TableName, column: string) {
+    setActiveColumn(current =>
+      current && current.table === table && current.column === column ? null : { table, column },
+    );
   }
 
   const picker = (
@@ -159,13 +135,11 @@ export default function App() {
       <>
         {picker}
         <Map
-          dark={dark}
+          tables={tables}
           geometries={geometries}
           bounds={bounds}
-          lineLayer={activeLineLayer(geometries, activeColumn, tables)}
-          blendDesireLines={desireLinesAreColored(activeColumn, tables)}
-          colorVersion={colorVersion}
-          onToggleDark={toggleDark}
+          draft={draft}
+          onDraft={setDraft}
           onDiagram={() => setView({ kind: 'diagram' })}
         />
       </>
@@ -177,7 +151,6 @@ export default function App() {
       <>
         {picker}
         <Diagram
-          dark={dark}
           loaded={loaded}
           onOpenTable={table => setView({ kind: 'table', table })}
           onPickFile={pickFile}
@@ -203,7 +176,6 @@ export default function App() {
     <>
       {picker}
       <Table
-        dark={dark}
         table={table}
         activeColumn={activeColumn}
         onSelectColumn={column => selectColumn(view.table, column)}

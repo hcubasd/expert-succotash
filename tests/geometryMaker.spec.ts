@@ -25,13 +25,12 @@ describe('makeSegments', () => {
     expect(Array.from(g.rowIndex)).toEqual([0, 0]);
   });
 
-  it('allocates a color and a hue slot per segment, not per vertex', () => {
+  it('allocates a color slot per segment, not per vertex', () => {
     const g = makeSegments([line([[0, 0], [1, 0], [2, 0]])], ZERO_ORIGIN);
     const segments = g.positions.length / 4;
     expect(segments).toBe(2);
     // one instance, one color: a line cannot be a gradient even in principle
     expect(g.colors.length).toBe(segments * 3);
-    expect(g.hues.length).toBe(segments);
   });
 
   it('keeps row indices distinct across several lines', () => {

@@ -1,15 +1,15 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { colorBg, squeezeFg } from 'psychic-potato';
-import { LUMINANCE_DARK, LUMINANCE_LIGHT, gradientAt, indexColor, ngon, rgbStr, semicircle } from '../lib/colors';
+import { LUMINANCE, gradientAt, indexColor, ngon, rgbStr, semicircle } from '../lib/colors';
+import { equalize } from '../lib/equalize';
 import { stratumText, valueText } from '../lib/tableMaker';
 import type { StratumColumn, Table as TableData, ValueColumn } from '../lib/tableMaker';
 import { labelOf } from './diagramLayout';
 
 type Props = {
-  dark: boolean;
   table: TableData;
-  // The one column lit app-wide. Table only highlights it when it belongs
-  // here; the map reads the same selection for its own purposes.
+  // Which column is lit. The map no longer reads this -- it has its own
+  // explicit selection -- so this is purely about highlighting here.
   activeColumn: { table: string; column: string } | null;
   onSelectColumn: (column: string) => void;
   onBack: () => void;
@@ -31,11 +31,9 @@ const PAGE = 100;
 
 type Cell = { text: string; fill?: string; onClick?: () => void };
 
-function CellBox({ cell, flex, dark }: { cell: Cell; flex: number; dark: boolean }) {
-  // A filled cell's swatch sits at a different luminance per mode (see
-  // colors.ts: LUMINANCE_DARK is bright, LUMINANCE_LIGHT is mid-toned), so
-  // the readable ink flips with it -- black on dark mode's bright swatches,
-  // white on light mode's darker ones.
+function CellBox({ cell, flex }: { cell: Cell; flex: number }) {
+  // Every swatch is drawn at the one palette luminance, which is bright, so
+  // black is always the readable ink over a filled cell.
   return (
     <div
       className="bg"
@@ -43,12 +41,12 @@ function CellBox({ cell, flex, dark }: { cell: Cell; flex: number; dark: boolean
       style={{ flex, cursor: cell.onClick ? 'pointer' : undefined, minWidth: 0 }}
       onClick={cell.onClick}
     >
-      <div className="fg" style={cell.fill ? { color: dark ? '#000' : '#fff' } : undefined}>{cell.text}</div>
+      <div className="fg" style={cell.fill ? { color: '#000' } : undefined}>{cell.text}</div>
     </div>
   );
 }
 
-export default function Table({ dark, table, activeColumn, onSelectColumn, onBack, onPickFile }: Props) {
+export default function Table({ table, activeColumn, onSelectColumn, onBack, onPickFile }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -112,29 +110,34 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
   // Palette lookups are built once per selection, not per cell: a column's
   // codes are already palette indices, so painting stays a lookup even at a
   // million rows.
-  const luminance = dark ? LUMINANCE_DARK : LUMINANCE_LIGHT;
-
   const paint = useMemo(() => {
     if (!lit) return null;
     const stratum = table.strata.find(c => c.name === lit);
     if (stratum) {
-      const palette = ngon(stratum.dictionary.length, stratum.rotation, luminance);
+      const palette = ngon(stratum.dictionary.length, stratum.rotation);
       if (!palette.length) return null;
       return { kind: 'stratum' as const, ofCode: (code: number) => rgbStr(indexColor(palette, code)) };
     }
     const value = table.values.find(c => c.name === lit);
     if (!value) return null;
-    const gradient = semicircle(value.rotation, luminance);
-    const span = value.max - value.min;
+    const gradient = semicircle(value.rotation);
+
+    // Equalized over the rows actually in view, not the column's full range.
+    // Filtering by a stratum therefore redistributes the ramp across that
+    // stratum's own values -- the table's equivalent of the map re-equalizing
+    // when a zoom changes what's on screen.
+    const present: number[] = [];
+    for (const row of rows) if (value.present[row]) present.push(value.data[row]);
+    const equalizer = equalize(present);
+
     return {
       kind: 'value' as const,
       ofRow: (row: number) => {
         if (!value.present[row]) return undefined;
-        const t = span === 0 ? 0.5 : (value.data[row] - value.min) / span;
-        return rgbStr(gradientAt(t, gradient));
+        return rgbStr(gradientAt(equalizer.at(value.data[row]), gradient));
       },
     };
-  }, [lit, table, luminance]);
+  }, [lit, table, rows]);
 
   const stratumFill = (column: StratumColumn, code: number) =>
     lit === column.name && paint?.kind === 'stratum' ? paint.ofCode(code) : undefined;
@@ -189,7 +192,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
       return (
         <div ref={rowRef} className="bg" style={rowStyle}>
           {values.map(column => (
-            <CellBox key={column.name} flex={1} cell={{ text: column.name, onClick: () => onSelectColumn(column.name) }} dark={dark} />
+            <CellBox key={column.name} flex={1} cell={{ text: column.name, onClick: () => onSelectColumn(column.name) }} />
           ))}
         </div>
       );
@@ -197,7 +200,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
     const [first, ...rest] = remainingStrata;
     return (
       <div ref={rowRef} className="bg" style={rowStyle}>
-        <CellBox flex={1} cell={{ text: first.name, onClick: () => onSelectColumn(first.name) }} dark={dark} />
+        <CellBox flex={1} cell={{ text: first.name, onClick: () => onSelectColumn(first.name) }} />
         <div className="bg" style={{ flexDirection: 'column', flex: remaining - 1, minWidth: 0 }}>
           {renderHeader(rest)}
         </div>
@@ -218,7 +221,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
           {rowIndices.map(row => (
             <div key={row} className="bg" style={{ flexDirection: 'row', minHeight: ROW_H, flexShrink: 0 }}>
               {values.map(column => (
-                <CellBox key={column.name} flex={1} cell={{ text: valueText(column, row), fill: valueFill(column, row) }} dark={dark} />
+                <CellBox key={column.name} flex={1} cell={{ text: valueText(column, row), fill: valueFill(column, row) }} />
               ))}
             </div>
           ))}
@@ -251,7 +254,6 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
                 fill: stratumFill(first, group.code),
                 onClick: () => toggleFilter(first, group.code),
               }}
-              dark={dark}
             />
             <div className="bg" style={{ flexDirection: 'column', flex: remaining - 1, minWidth: 0 }}>
               {renderBody(group.rows, rest)}
@@ -269,12 +271,14 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
   useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) return;
-    colorBg(root, { from: 0.75, to: dark ? 0 : 1 });
+    // From the palette's own luminance up to white: there is one mode now,
+    // so the ramp has one direction.
+    colorBg(root, { from: LUMINANCE, to: 1 });
     root.querySelectorAll<HTMLElement>('[data-fill]').forEach(el => {
       const fill = el.dataset.fill;
       if (fill) el.style.backgroundColor = fill;
     });
-  }, [dark, lit, table, strataOrder, valuesOrder, filters, batches.length]);
+  }, [lit, table, strataOrder, valuesOrder, filters, batches.length]);
 
   // Only the header is measured; the body inherits the result. Fitting the
   // whole table would re-measure every mounted cell on each step of the
@@ -339,7 +343,7 @@ export default function Table({ dark, table, activeColumn, onSelectColumn, onBac
       className="bg"
       style={{
         flexDirection: 'column', width: '100vw', height: '100vh',
-        overflowX: 'auto', color: dark ? '#fff' : '#000',
+        overflowX: 'auto', color: '#000',
       }}
     >
       {renderHeader(strata, true)}

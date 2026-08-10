@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gradientAt, hueIndexOf, indexColor, ngon, semicircle, uniqueOrdered, wheel } from '../src/lib/colors';
+import { gradientAt, indexColor, ngon, ramps, semicircle, uniqueOrdered, wheel } from '../src/lib/colors';
 
 describe('ngon', () => {
   it('returns one color per distinct value', () => {
@@ -51,19 +51,22 @@ describe('gradientAt', () => {
   });
 });
 
-describe('hueIndexOf', () => {
-  it('recovers the wheel position of a wheel color exactly', () => {
-    const colors = wheel();
-    for (const i of [0, 1, 77, 128, 255]) {
-      expect(hueIndexOf(colors[i])).toBe(i);
-    }
+describe('ramps', () => {
+  it('gives one 128-color ramp per resource', () => {
+    const built = ramps(3);
+    expect(built).toHaveLength(3);
+    for (const ramp of built) expect(ramp).toHaveLength(128);
   });
 
-  it('places every palette color somewhere on the wheel', () => {
-    for (const color of ngon(7, 42)) {
-      const index = hueIndexOf(color);
-      expect(index).toBeGreaterThanOrEqual(0);
-      expect(index).toBeLessThan(256);
+  it('starts each ramp on its own n-gon vertex, so resources start far apart', () => {
+    const starts = ngon(4, 0);
+    ramps(4).forEach((ramp, i) => expect(ramp[0]).toEqual(starts[i]));
+  });
+
+  it('draws every ramp color from the wheel itself -- no invented colors', () => {
+    const onWheel = new Set(wheel().map(c => `${c.r},${c.g},${c.b}`));
+    for (const ramp of ramps(5)) {
+      for (const color of ramp) expect(onWheel.has(`${color.r},${color.g},${color.b}`)).toBe(true);
     }
   });
 });

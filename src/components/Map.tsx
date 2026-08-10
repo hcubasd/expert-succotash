@@ -1,21 +1,19 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { MapRenderer } from '../gl/renderer';
 import type { View } from '../gl/renderer';
-import { LUMINANCE_DARK, LUMINANCE_LIGHT } from '../lib/colors';
 import type { Bounds, Geometries } from '../lib/geometryMaker';
-import { paperOf } from '../lib/mapColors';
+import { buildScene, legendFromFlow } from '../lib/mapScene';
+import type { Legend } from '../lib/mapScene';
+import { toSelection } from '../lib/mapValues';
+import type { Draft, Tables } from '../lib/mapValues';
+import MapPanel from './MapPanel';
 
 type Props = {
-  dark: boolean;
+  tables: Tables;
   geometries: Geometries;
   bounds: Bounds | null;
-  lineLayer: 'network' | 'desireLines' | null;
-  blendDesireLines: boolean;
-  // Bumped whenever the fill colors on `geometries` are rewritten in place;
-  // the arrays themselves keep their identity, so this is what tells the
-  // renderer to re-upload them.
-  colorVersion: number;
-  onToggleDark: () => void;
+  draft: Draft;
+  onDraft: (draft: Draft) => void;
   onDiagram: () => void;
 };
 
@@ -25,8 +23,8 @@ const MIN_DRAG_PX = 4;
 
 type Drag = { x0: number; y0: number; x1: number; y1: number };
 
-// Pixels per world unit, recovered from the view. The transform is
-// (world - center) * scale, where scale carries the 2/size clip conversion.
+// Device pixels per world unit. The transform is (world - center) * scale,
+// where scale already carries the 2/size clip conversion.
 const pixelsPerUnit = (view: View, width: number) => (view.scaleX * width) / 2;
 
 function fitView(bounds: Bounds | null, width: number, height: number): View {
@@ -45,36 +43,32 @@ function fitView(bounds: Bounds | null, width: number, height: number): View {
   };
 }
 
-export default function Map({
-  dark, geometries, bounds, lineLayer, blendDesireLines, colorVersion, onToggleDark, onDiagram,
-}: Props) {
+export default function Map({ tables, geometries, bounds, draft, onDraft, onDiagram }: Props) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<MapRenderer | null>(null);
   const viewRef = useRef<View>({ centerX: 0, centerY: 0, scaleX: 1, scaleY: 1 });
-  // width/height are the backing store's device pixels; ratio is recorded
-  // alongside them by the same measurement that set them, so anything sized
-  // in CSS pixels converts against the ratio the canvas was actually built
-  // with rather than whatever window.devicePixelRatio reads at draw time.
+
   const [size, setSize] = useState({ width: 0, height: 0, ratio: 1 });
+  const [portrait, setPortrait] = useState(false);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
-  // Only used to force a redraw after an interaction; the view itself lives
-  // in a ref so a drag doesn't rebuild the component tree on every frame.
-  const [, setTick] = useState(0);
-  const redraw = useCallback(() => setTick(t => t + 1), []);
+  // Zoom lives in a ref so the transform is never a render's worth of work
+  // behind; this is what tells the draw effect the view moved.
+  const [viewVersion, setViewVersion] = useState(0);
+  const [flowLegend, setFlowLegend] = useState<Legend | null>(null);
+  const [staticLegend, setStaticLegend] = useState<Legend | null>(null);
 
-  // These four run as layout effects, in this declaration order, and that
-  // order is load-bearing: create the context, size the canvas, fit the
-  // view, then draw -- all within one commit, before the browser paints.
-  // Creation used to be a passive effect while the draw was a layout one,
-  // which meant the draw always ran first and found a null renderer, so the
-  // mount commit painted nothing and the picture only appeared once some
-  // later render happened to come along.
+  const selection = useMemo(() => toSelection(draft), [draft]);
+
+  // Creation, measurement and draw are all layout effects in this order:
+  // a passive effect for creation would run *after* the draw and leave the
+  // mount commit painting nothing.
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     try {
-      rendererRef.current = new MapRenderer(canvas, dark ? LUMINANCE_DARK : LUMINANCE_LIGHT);
+      rendererRef.current = new MapRenderer(canvas);
     } catch (error) {
       setFailed(error instanceof Error ? error.message : String(error));
       return;
@@ -87,7 +81,8 @@ export default function Map({
 
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const root = rootRef.current;
+    if (!canvas || !root) return;
     const measure = () => {
       const ratio = window.devicePixelRatio || 1;
       const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
@@ -95,10 +90,12 @@ export default function Map({
       canvas.width = width;
       canvas.height = height;
       setSize({ width, height, ratio });
+      setPortrait(root.clientHeight > root.clientWidth);
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(canvas);
+    observer.observe(root);
     return () => observer.disconnect();
   }, []);
 
@@ -107,43 +104,29 @@ export default function Map({
   useLayoutEffect(() => {
     rendererRef.current?.invalidate();
     viewRef.current = fitView(bounds, size.width, size.height);
-    redraw();
-  }, [geometries, bounds, size.width, size.height, redraw]);
+    setViewVersion(v => v + 1);
+  }, [geometries, bounds, size.width, size.height]);
 
   useLayoutEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer || size.width === 0) return;
-    renderer.setLuminance(dark ? LUMINANCE_DARK : LUMINANCE_LIGHT);
-    // How far in the view has closed relative to the fitted one, which is
-    // what mark sizing scales against. The fit is the same cheap arithmetic
-    // the view itself is built from, so this needs nothing kept in sync.
-    const fitted = fitView(bounds, size.width, size.height).scaleX;
-    const zoom = fitted > 0 ? viewRef.current.scaleX / fitted : 1;
-    renderer.render(
-      geometries, viewRef.current, paperOf(dark), lineLayer, blendDesireLines, colorVersion, size.ratio, zoom,
-    );
-  });
 
-  // Scrolling pans. Zoom stays on the drag-rectangle gesture, so the wheel is
-  // free for this -- and panning only ever moves the translation half of a
-  // transform that zooming already needs.
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault();
-      const scale = pixelsPerUnit(viewRef.current, size.width);
-      if (scale <= 0) return;
-      viewRef.current = {
-        ...viewRef.current,
-        centerX: viewRef.current.centerX + (event.deltaX * size.ratio) / scale,
-        centerY: viewRef.current.centerY - (event.deltaY * size.ratio) / scale,
-      };
-      redraw();
-    };
-    canvas.addEventListener('wheel', onWheel, { passive: false });
-    return () => canvas.removeEventListener('wheel', onWheel);
-  }, [size.width, size.ratio, redraw]);
+    const view = viewRef.current;
+    const built = buildScene(
+      tables,
+      geometries,
+      selection,
+      view,
+      pixelsPerUnit(view, size.width),
+      size.ratio,
+    );
+    const stats = renderer.render(built.scene);
+
+    setStaticLegend(built.legend);
+    // Desire lines can only be measured by drawing them, so their legend
+    // arrives with the render's return value rather than ahead of it.
+    setFlowLegend(built.pendingFlowRamp && stats ? legendFromFlow(stats, built.pendingFlowRamp) : null);
+  }, [tables, geometries, selection, size, viewVersion]);
 
   function toWorld(clientX: number, clientY: number) {
     const canvas = canvasRef.current!;
@@ -178,65 +161,91 @@ export default function Map({
 
     const a = toWorld(current.x0, current.y0);
     const b = toWorld(current.x1, current.y1);
-    const rect: Bounds = {
-      minX: Math.min(a.x, b.x),
-      maxX: Math.max(a.x, b.x),
-      minY: Math.min(a.y, b.y),
-      maxY: Math.max(a.y, b.y),
-    };
-    viewRef.current = fitView(rect, size.width, size.height);
-    redraw();
+    viewRef.current = fitView(
+      { minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x), minY: Math.min(a.y, b.y), maxY: Math.max(a.y, b.y) },
+      size.width,
+      size.height,
+    );
+    setViewVersion(v => v + 1);
   }
 
-  function reset() {
+  const reset = useCallback(() => {
     viewRef.current = fitView(bounds, size.width, size.height);
-    redraw();
-  }
+    setViewVersion(v => v + 1);
+  }, [bounds, size.width, size.height]);
 
-  const paper = dark ? '#000' : '#fff';
-  const ink = dark ? '#fff' : '#000';
   const empty = !geometries.zones && !geometries.network && !geometries.desireLines && !geometries.agents;
 
   return (
-    <div style={{ width: '100vw', height: '100vh', background: paper, color: ink, position: 'relative', overflow: 'hidden' }}>
-      <canvas
-        ref={canvasRef}
-        style={{ display: 'block', width: '100%', height: '100%', cursor: 'crosshair', touchAction: 'none' }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-      />
-
-      {drag && (
-        <div
-          style={{
-            position: 'fixed',
-            left: Math.min(drag.x0, drag.x1),
-            top: Math.min(drag.y0, drag.y1),
-            width: Math.abs(drag.x1 - drag.x0),
-            height: Math.abs(drag.y1 - drag.y0),
-            border: `1px solid ${ink}`,
-            pointerEvents: 'none',
-          }}
+    <div
+      ref={rootRef}
+      style={{
+        display: 'flex',
+        flexDirection: portrait ? 'column' : 'row',
+        width: '100vw',
+        height: '100vh',
+        background: '#fff',
+        color: '#000',
+      }}
+    >
+      {/* The canvas is square in both orientations, so the world never
+          distorts and the zoom rectangle is read in the same units it was
+          drawn in. */}
+      <div
+        style={{
+          position: 'relative',
+          flexShrink: 0,
+          aspectRatio: '1 / 1',
+          ...(portrait ? { width: '100%' } : { height: '100%' }),
+        }}
+      >
+        <canvas
+          ref={canvasRef}
+          style={{ display: 'block', width: '100%', height: '100%', cursor: 'crosshair', touchAction: 'none' }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
         />
-      )}
 
-      {(empty || failed) && (
-        <div
-          style={{
-            position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            pointerEvents: 'none', opacity: 0.5, fontSize: 14,
-          }}
-        >
-          {failed ?? 'load files in the diagram view to render the map'}
-        </div>
-      )}
+        {drag && (
+          <div
+            style={{
+              position: 'fixed',
+              left: Math.min(drag.x0, drag.x1),
+              top: Math.min(drag.y0, drag.y1),
+              width: Math.abs(drag.x1 - drag.x0),
+              height: Math.abs(drag.y1 - drag.y0),
+              border: '1px solid #000',
+              pointerEvents: 'none',
+            }}
+          />
+        )}
 
-      <button className="overlay-btn" style={{ top: 12, right: 12 }} onClick={reset}>reset view</button>
-      <button className="overlay-btn" style={{ bottom: 12, left: 12 }} onClick={onToggleDark}>
-        {dark ? 'light' : 'dark'}
-      </button>
-      <button className="overlay-btn" style={{ bottom: 12, right: 12 }} onClick={onDiagram}>diagram →</button>
+        {(empty || failed) && (
+          <div
+            style={{
+              position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              pointerEvents: 'none', opacity: 0.5, fontSize: 14, textAlign: 'center', padding: 24,
+            }}
+          >
+            {failed ?? 'load files in the diagram view to render the map'}
+          </div>
+        )}
+
+        <button className="overlay-btn" style={{ position: 'absolute', top: 12, right: 12 }} onClick={reset}>
+          reset view
+        </button>
+      </div>
+
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex' }}>
+        <MapPanel
+          tables={tables}
+          draft={draft}
+          onDraft={onDraft}
+          legend={flowLegend ?? staticLegend}
+          onDiagram={onDiagram}
+        />
+      </div>
     </div>
   );
 }

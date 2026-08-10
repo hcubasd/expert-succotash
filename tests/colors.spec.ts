@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { gradientAt, indexColor, ngon, ramps, semicircle, uniqueOrdered, wheel } from '../src/lib/colors';
+import {
+  SESSION_ROTATION, gradientAt, indexColor, ngon, ngonStarts, ramps, semicircle, uniqueOrdered,
+  wheel,
+} from '../src/lib/colors';
 
 describe('ngon', () => {
   it('returns one color per distinct value', () => {
@@ -59,7 +62,7 @@ describe('ramps', () => {
   });
 
   it('starts each ramp on its own n-gon vertex, so resources start far apart', () => {
-    const starts = ngon(4, 0);
+    const starts = ngon(4, SESSION_ROTATION);
     ramps(4).forEach((ramp, i) => expect(ramp[0]).toEqual(starts[i]));
   });
 
@@ -74,5 +77,43 @@ describe('ramps', () => {
 describe('uniqueOrdered', () => {
   it('keeps first-seen order and drops repeats', () => {
     expect(uniqueOrdered(['b', 'a', 'b', 'c'])).toEqual(['b', 'a', 'c']);
+  });
+});
+
+describe('ngonStarts', () => {
+  it('hands back wheel indices that can be fed straight back in as rotations', () => {
+    // The whole two-level scheme rests on this: an n-gon's rotation index is
+    // exactly its first vertex's wheel index, so a start can seed another
+    // polygon.
+    for (const start of ngonStarts(5)) {
+      expect(wheel()[start]).toEqual(ngon(3, start)[0]);
+    }
+  });
+
+  it('spaces its starts evenly around the wheel', () => {
+    const starts = ngonStarts(4);
+    const gaps = starts.map((s, i) => (starts[(i + 1) % 4] - s + 256) % 256);
+    for (const gap of gaps) expect(gap).toBe(64);
+  });
+
+  it('is empty for a table with no strata at all', () => {
+    expect(ngonStarts(0)).toEqual([]);
+  });
+});
+
+describe('session rotation', () => {
+  it('is shared, so every palette in a session is spaced off one origin', () => {
+    // ramps and stratum starts must agree for the same n, or the two levels
+    // would be measuring from different places.
+    expect(ramps(4).map(r => r[0])).toEqual(ngonStarts(4).map(i => wheel()[i]));
+  });
+
+  it('offsets the whole wheel rather than reordering it', () => {
+    // Whatever the rotation, the starts are still 256/n apart -- randomizing
+    // it changes which hues appear, never how far apart they are.
+    const starts = ngonStarts(8);
+    expect(new Set(starts).size).toBe(8);
+    for (const start of starts) expect(start).toBeGreaterThanOrEqual(0);
+    for (const start of starts) expect(start).toBeLessThan(256);
   });
 });

@@ -1,4 +1,4 @@
-import { randomRotation, uniqueOrdered } from './colors';
+import { ngonStarts, randomRotation, uniqueOrdered } from './colors';
 import type { RawCell, RawTable } from './rawTable';
 import { classifyColumns } from './schema';
 import type { TableName } from './schema';
@@ -15,8 +15,10 @@ export type StratumColumn = {
   codes: Uint32Array;
   // Distinct values in first-seen order; codes index into this.
   dictionary: RawCell[];
-  // Rolled once, here, so a column's hues stay put for as long as the file is
-  // loaded instead of reshuffling every time it's clicked.
+  // Where on the wheel this column's palette begins. Strata take their start
+  // from the table's own m-gon, so the m stratum columns of a table are as
+  // far apart from each other as the wheel allows; the column's palette is
+  // then a k-gon beginning there, k being its number of distinct values.
   rotation: number;
 };
 
@@ -42,7 +44,7 @@ function isNumericColumn(cells: RawCell[]): boolean {
   return cells.every(c => c === null || typeof c === 'number');
 }
 
-function makeStratum(name: string, cells: RawCell[]): StratumColumn {
+function makeStratum(name: string, cells: RawCell[], rotation: number): StratumColumn {
   const dictionary = uniqueOrdered(cells.map(c => (c === null ? '' : c)));
   const index = new Map<RawCell, number>();
   dictionary.forEach((v, i) => index.set(v, i));
@@ -51,7 +53,7 @@ function makeStratum(name: string, cells: RawCell[]): StratumColumn {
   for (let i = 0; i < cells.length; i++) {
     codes[i] = index.get(cells[i] === null ? '' : cells[i]) ?? 0;
   }
-  return { name, codes, dictionary, rotation: randomRotation() };
+  return { name, codes, dictionary, rotation };
 }
 
 function makeValue(name: string, cells: RawCell[]): ValueColumn {
@@ -84,11 +86,15 @@ export function makeTable(name: TableName, raw: RawTable): Table {
   const byHeader = new Map(raw.headers.map((h, i) => [h, raw.columns[i]]));
   const isNumeric = (col: string) => isNumericColumn(byHeader.get(col) ?? []);
   const { strata, values } = classifyColumns(name, raw.headers, isNumeric);
+  const startsForStrata = ngonStarts(strata.length);
 
   return {
     name,
     rowCount: raw.rowCount,
-    strata: strata.map(col => makeStratum(col, byHeader.get(col) ?? [])),
+    // m strata -> an m-gon, one evenly spaced starting hue each, so
+    // switching between two stratum columns is a visible change of palette
+    // rather than two arbitrary rolls that might land on the same hue.
+    strata: strata.map((col, i) => makeStratum(col, byHeader.get(col) ?? [], startsForStrata[i])),
     values: values.map(col => makeValue(col, byHeader.get(col) ?? [])),
   };
 }

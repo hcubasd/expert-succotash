@@ -61,6 +61,41 @@ export function semicircle(rotation: number): RgbColor[] {
   return ramp;
 }
 
+// Which rotation of the top-level n-gon this session uses. Rolled once per
+// page load: the choice is arbitrary, so it may as well vary, but it's
+// shared rather than rolled per palette so that everything in a session is
+// spaced off one common starting point.
+export const SESSION_ROTATION = randomRotation();
+
+let indexCache: Map<string, number> | null = null;
+
+// Which of the 256 wheel vertices a color sits on. Every color the app
+// produces comes off the wheel, so this is an exact lookup rather than a
+// nearest match.
+export function wheelIndexOf(color: RgbColor): number {
+  if (!indexCache) {
+    const built = new Map<string, number>();
+    wheel().forEach((c, i) => {
+      const key = rgbStr(c);
+      if (!built.has(key)) built.set(key, i);
+    });
+    indexCache = built;
+  }
+  return indexCache.get(rgbStr(color)) ?? 0;
+}
+
+// The wheel positions of an n-gon's vertices at this session's rotation.
+//
+// These are the starting points everything else is built from, two levels
+// deep: a resource's ramp walks half the wheel from one of them, and a
+// stratum column's palette is a k-gon *beginning* at one of them. That works
+// because an n-gon's rotation index is exactly its first vertex's wheel
+// index -- checked against matchColors directly -- so a wheel index can be
+// handed straight back in as a rotation.
+export function ngonStarts(n: number): number[] {
+  return ngon(n, SESSION_ROTATION).map(wheelIndexOf);
+}
+
 // One ramp per resource: n evenly spaced starting hues from the n-gon, each
 // walked half way round the wheel. Two resources therefore start as far
 // apart as the wheel allows and their ramps stay tellable apart along their
@@ -70,15 +105,8 @@ let rampsCache: { n: number; ramps: RgbColor[][] } | null = null;
 
 export function ramps(n: number): RgbColor[][] {
   if (rampsCache && rampsCache.n === n) return rampsCache.ramps;
-
-  const w = wheel();
-  const byRgb = new Map<string, number>();
-  w.forEach((c, i) => {
-    const key = rgbStr(c);
-    if (!byRgb.has(key)) byRgb.set(key, i);
-  });
-
-  const built = ngon(n, 0).map(start => semicircle(byRgb.get(rgbStr(start)) ?? 0));
+  // Cached on n alone: the session rotation is fixed for the page's life.
+  const built = ngonStarts(n).map(semicircle);
   rampsCache = { n, ramps: built };
   return built;
 }

@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { squeezeFg } from 'psychic-potato';
-import { LUMINANCE, grayAt, ngon, randomRotation, rgbStr } from '../lib/colors';
+import { LUMINANCE, SESSION_ROTATION, grayAt, ngon, rgbStr } from '../lib/colors';
 import { EDGES, NODES, POSITIONS, labelOf } from './diagramLayout';
 import type { TableName } from '../lib/schema';
 
@@ -22,20 +22,17 @@ const Spacer = ({ weight }: { weight: number }) => <div style={{ flex: weight }}
 const CARD_WEIGHT = 2;
 const GAP_WEIGHT = 1;
 
-// Which hue lands at slot 0 varies session to session, purely for visual
-// variety -- POSITIONS (the slot *each node* draws from) is what actually
-// matters for readability, and that's fixed data, solved once offline. This
-// has to be a module-level constant, not component state: it should survive
-// navigating away from and back to the diagram view within one page load,
-// only reshuffling on an actual reload.
-const ROTATION = randomRotation();
-
 export default function Diagram({ loaded, onOpenTable, onPickFile, onBack, onClearAll }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const nodeRefs = useRef<Map<TableName, HTMLDivElement>>(new Map());
   const [edges, setEdges] = useState<Edge[]>([]);
 
-  const palette = useMemo(() => ngon(NODES.length, ROTATION), []);
+  // Which hue lands at slot 0 varies session to session, purely for visual
+  // variety -- POSITIONS (the slot *each node* draws from) is what actually
+  // matters for readability, and that's fixed data, solved once offline.
+  // The session rotation is a module constant, so it survives navigating
+  // away and back within one page load and only rerolls on a real reload.
+  const palette = useMemo(() => ngon(NODES.length, SESSION_ROTATION), []);
 
   // Unloaded cards sit at the same luminance as loaded ones, so the two
   // read as one consistent surface rather than the blanks looking like a

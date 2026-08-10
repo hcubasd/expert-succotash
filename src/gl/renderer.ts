@@ -95,7 +95,7 @@ export class MapRenderer {
   } | null = null;
   private buffers = new Map<string, Cached>();
   private floatTargetsSupported: boolean;
-  private readback: Uint16Array | null = null;
+  private readback: Uint16Array | Float32Array | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     // Antialiasing on: every line is 1px now, so almost all of a line is
@@ -163,6 +163,17 @@ export class MapRenderer {
     this.buffers.clear();
   }
 
+  // A draw rejected for a bad attribute buffer is otherwise completely
+  // silent: WebGL flags the error and renders nothing, with no exception and
+  // no console output. Cheap enough to leave on, since renders here are
+  // driven by user actions rather than by an animation loop.
+  private checkError(label: string) {
+    const error = this.gl.getError();
+    if (error !== this.gl.NO_ERROR) {
+      console.error(`WebGL error after ${label}: 0x${error.toString(16)}`);
+    }
+  }
+
   private setTransform(program: WebGLProgram, view: View) {
     const gl = this.gl;
     gl.uniform2f(gl.getUniformLocation(program, 'u_center'), view.centerX, view.centerY);
@@ -187,6 +198,7 @@ export class MapRenderer {
     gl.vertexAttribPointer(colorLoc, 3, gl.UNSIGNED_BYTE, true, 0, 0);
 
     gl.drawArrays(mode, 0, positions.length / 2);
+    this.checkError(key);
   }
 
   private drawAgents(
@@ -229,6 +241,7 @@ export class MapRenderer {
     gl.vertexAttribDivisor(colorLoc, 1);
 
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, positions.length / 2);
+    this.checkError('agents');
 
     // Divisors live on the shared default VAO, so anything set to 1 has to
     // go back to 0 or the next draw inherits it.
@@ -283,7 +296,7 @@ export class MapRenderer {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.accumulator = { drawFramebuffer, resolveFramebuffer, renderbuffer, texture, width, height };
-    this.readback = new Uint16Array(width * height * 4);
+    this.readback = null; // allocated once the read format is known
     return this.accumulator;
   }
 
@@ -342,6 +355,7 @@ export class MapRenderer {
     gl.vertexAttribPointer(quantityLoc, 1, gl.FLOAT, false, 0, 0);
 
     gl.drawArrays(gl.LINES, 0, layer.positions.length / 2);
+    this.checkError('desire-line accumulation');
     gl.disable(gl.BLEND);
 
     if (target.drawFramebuffer !== target.resolveFramebuffer) {
@@ -355,17 +369,31 @@ export class MapRenderer {
     // Measure: the same coverage correction the resolve shader applies, so
     // the histogram is built over exactly the values that will be colored.
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.resolveFramebuffer);
-    const raw = this.readback!;
-    gl.readPixels(0, 0, width, height, gl.RGBA, gl.HALF_FLOAT, raw);
+
+    // WebGL2 guarantees only (RGBA, UNSIGNED_BYTE) plus one pair the
+    // implementation picks per attachment format. For RGBA16F that is
+    // usually (RGBA, HALF_FLOAT), but a driver is free to prefer FLOAT, and
+    // guessing wrong is an INVALID_OPERATION that silently reads nothing --
+    // so this asks rather than assuming.
+    const readType = gl.getParameter(gl.IMPLEMENTATION_COLOR_READ_TYPE) as number;
+    const isFloat = readType === gl.FLOAT;
+    const pixels = width * height;
+    if (!this.readback || this.readback.length !== pixels * 4
+      || (isFloat) !== (this.readback instanceof Float32Array)) {
+      this.readback = isFloat ? new Float32Array(pixels * 4) : new Uint16Array(pixels * 4);
+    }
+    const raw = this.readback;
+    gl.readPixels(0, 0, width, height, gl.RGBA, isFloat ? gl.FLOAT : gl.HALF_FLOAT, raw);
+    this.checkError('accumulator readback');
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    const pixels = width * height;
+    const decode = isFloat ? (bits: number) => bits : halfToFloat;
     const values = new Float32Array(pixels);
     let max = 0;
     for (let i = 0; i < pixels; i++) {
-      const coverage = Math.min(halfToFloat(raw[i * 4 + 3]), 1);
+      const coverage = Math.min(decode(raw[i * 4 + 3]), 1);
       if (!(coverage > 1e-4)) continue;
-      const value = halfToFloat(raw[i * 4]) / coverage;
+      const value = decode(raw[i * 4]) / coverage;
       values[i] = value;
       if (value > max) max = value;
     }
@@ -373,6 +401,7 @@ export class MapRenderer {
 
     gl.bindTexture(gl.TEXTURE_2D, this.cdfTexture);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, CDF_BINS, 1, gl.RED, gl.FLOAT, cdf);
+    this.checkError('cdf upload');
 
     const rampPixels = new Uint8Array(128 * 4);
     layer.ramp.forEach((c, i) => {
@@ -383,6 +412,7 @@ export class MapRenderer {
     });
     gl.bindTexture(gl.TEXTURE_2D, this.rampTexture);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 128, 1, gl.RGBA, gl.UNSIGNED_BYTE, rampPixels);
+    this.checkError('ramp upload');
 
     // Resolve onto the scene, blended so partially covered edges soften into
     // what's beneath instead of punching a hard silhouette.
@@ -407,6 +437,7 @@ export class MapRenderer {
     gl.enableVertexAttribArray(cornerLoc);
     gl.vertexAttribPointer(cornerLoc, 2, gl.FLOAT, false, 0, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+    this.checkError('desire-line resolve');
     gl.disable(gl.BLEND);
     gl.activeTexture(gl.TEXTURE0);
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ZERO_ORIGIN, boundsOf, makePoints, makePolygons, makeSegments, originOf, rawBounds,
+  ZERO_ORIGIN, boundsForMode, boundsOf, makePoints, makePolygons, makeSegments, originOf, rawBounds,
 } from '../src/lib/geometryMaker';
 import type { RawGeometry } from '../src/lib/rawTable';
 
@@ -25,12 +25,11 @@ describe('makeSegments', () => {
     expect(Array.from(g.rowIndex)).toEqual([0, 0]);
   });
 
-  it('allocates a color slot per segment, not per vertex', () => {
+  it('tags one row per segment, so a colour cannot vary along a line', () => {
     const g = makeSegments([line([[0, 0], [1, 0], [2, 0]])], ZERO_ORIGIN);
     const segments = g.positions.length / 4;
     expect(segments).toBe(2);
-    // one instance, one color: a line cannot be a gradient even in principle
-    expect(g.colors.length).toBe(segments * 3);
+    expect(g.rowIndex.length).toBe(segments);
   });
 
   it('keeps row indices distinct across several lines', () => {
@@ -175,5 +174,36 @@ describe('real projected coordinates', () => {
     // the same world coordinate lands in the same place either way
     expect(asSegment.positions[0]).toBeCloseTo(asPoint.positions[0], 6);
     expect(asSegment.positions[1]).toBeCloseTo(asPoint.positions[1], 6);
+  });
+});
+
+describe('boundsForMode', () => {
+  const geometries = {
+    zones: makePolygons([square()], ZERO_ORIGIN),
+    network: makeSegments([line([[100, 100], [200, 200]])], ZERO_ORIGIN),
+    desireLines: null,
+    agents: makePoints([point(-50, -50)], ZERO_ORIGIN),
+  };
+
+  it('frames only the layer the mode draws, not everything loaded', () => {
+    // The network reaches out to 200; framing zones against that would leave
+    // the unit square a speck in the corner.
+    expect(boundsForMode(geometries, 'zones')).toEqual({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
+    expect(boundsForMode(geometries, 'network')).toEqual({ minX: 100, minY: 100, maxX: 200, maxY: 200 });
+    expect(boundsForMode(geometries, 'agents')).toEqual({ minX: -50, minY: -50, maxX: -50, maxY: -50 });
+  });
+
+  it('falls back to the zones basemap when no mode is chosen', () => {
+    expect(boundsForMode(geometries, null)).toEqual({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
+  });
+
+  it('falls back to the basemap when the mode has no geometry of its own', () => {
+    expect(boundsForMode({ ...geometries, network: null }, 'network'))
+      .toEqual({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
+  });
+
+  it('falls back to everything when there is no basemap either', () => {
+    const bounds = boundsForMode({ ...geometries, zones: null }, null);
+    expect(bounds).toEqual({ minX: -50, minY: -50, maxX: 200, maxY: 200 });
   });
 });

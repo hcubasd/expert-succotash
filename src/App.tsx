@@ -5,10 +5,10 @@ import Table from './components/Table';
 import { loadCsv } from './lib/csvLoader';
 import { loadGpkg } from './lib/gpkgLoader';
 import {
-  boundsOf, emptyGeometries, makeDesireLineEdges, makePoints, makePolygons, makeSegments,
+  emptyGeometries, makeDesireLineEdges, makePoints, makePolygons, makeSegments,
   originOf, rawBounds,
 } from './lib/geometryMaker';
-import type { Bounds, Geometries, Origin } from './lib/geometryMaker';
+import type { Geometries, Origin } from './lib/geometryMaker';
 import { stratumValues, valueNumbers } from './lib/mapValues';
 import type { Draft } from './lib/mapValues';
 import type { RawGeometry, RawTable } from './lib/rawTable';
@@ -33,7 +33,6 @@ export default function App() {
   const [tables, setTables] = useState<Partial<Record<TableName, TableData>>>({});
   const [activeColumn, setActiveColumn] = useState<ActiveColumn | null>(null);
   const [geometries, setGeometries] = useState<Geometries>(emptyGeometries);
-  const [bounds, setBounds] = useState<Bounds | null>(null);
   const [draft, setDraft] = useState<Draft>({ mode: null });
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -90,7 +89,6 @@ export default function App() {
 
       setTables(nextTables);
       setGeometries(nextGeometries);
-      setBounds(boundsOf(nextGeometries));
       setActiveColumn(nextSelection);
     },
     [tables, geometries, activeColumn],
@@ -115,7 +113,6 @@ export default function App() {
     originRef.current = null;
     setTables({});
     setGeometries(emptyGeometries());
-    setBounds(null);
     setActiveColumn(null);
     setDraft({ mode: null });
   }
@@ -137,7 +134,6 @@ export default function App() {
         <Map
           tables={tables}
           geometries={geometries}
-          bounds={bounds}
           draft={draft}
           onDraft={setDraft}
           onDiagram={() => setView({ kind: 'diagram' })}

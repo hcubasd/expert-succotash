@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { MapRenderer } from '../gl/renderer';
 import type { View } from '../gl/renderer';
+import { boundsForMode } from '../lib/geometryMaker';
 import type { Bounds, Geometries } from '../lib/geometryMaker';
 import { buildScene, legendFromFlow } from '../lib/mapScene';
 import type { Legend } from '../lib/mapScene';
@@ -11,7 +12,6 @@ import MapPanel from './MapPanel';
 type Props = {
   tables: Tables;
   geometries: Geometries;
-  bounds: Bounds | null;
   draft: Draft;
   onDraft: (draft: Draft) => void;
   onDiagram: () => void;
@@ -43,7 +43,7 @@ function fitView(bounds: Bounds | null, width: number, height: number): View {
   };
 }
 
-export default function Map({ tables, geometries, bounds, draft, onDraft, onDiagram }: Props) {
+export default function Map({ tables, geometries, draft, onDraft, onDiagram }: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<MapRenderer | null>(null);
@@ -60,6 +60,8 @@ export default function Map({ tables, geometries, bounds, draft, onDraft, onDiag
   const [staticLegend, setStaticLegend] = useState<Legend | null>(null);
 
   const selection = useMemo(() => toSelection(draft), [draft]);
+  // The fit follows the mode, so changing mode reframes onto that layer.
+  const bounds = useMemo(() => boundsForMode(geometries, draft.mode), [geometries, draft.mode]);
 
   // Creation, measurement and draw are all layout effects in this order:
   // a passive effect for creation would run *after* the draw and leave the

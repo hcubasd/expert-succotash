@@ -120,6 +120,9 @@ export default function MapPanel({ tables, draft, onDraft, legend, onDiagram }: 
         flexDirection: 'column',
         gap: 14,
         padding: 14,
+        // Claims the whole remainder rather than shrinking to its content:
+        // the panel is the other half of the view, not a floating card.
+        flex: 1,
         minWidth: 0,
         minHeight: 0,
         overflow: 'auto',

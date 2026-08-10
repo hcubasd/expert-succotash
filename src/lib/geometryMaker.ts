@@ -94,10 +94,9 @@ export type SegmentGeometry = {
   // doubles as the per-instance attribute layout: start reads at offset 0
   // and end at offset 8 of the same 16-byte stride.
   positions: Float32Array;
-  // One entry per segment -- the segment is the instance, so a color can't
-  // vary along a line even in principle.
+  // One entry per segment, so a colour can't vary along a line even in
+  // principle. Colours themselves are built per selection, not stored here.
   rowIndex: Uint32Array;
-  colors: Uint8Array;
   rowBounds: RowBounds;
 };
 
@@ -116,7 +115,6 @@ export type EdgeGeometry = {
 export type PointGeometry = {
   rowCount: number;
   positions: Float32Array;
-  colors: Uint8Array;
 };
 
 export type Geometries = {
@@ -208,7 +206,11 @@ export function makePolygons(geometries: RawGeometry[], origin: Origin): Polygon
     fillColors: new Uint8Array((fill.length / 2) * 3),
     borderPositions: new Float32Array(border),
     borderRowIndex: new Uint32Array(borderRow),
-    borderColors: new Uint8Array((border.length / 4) * 3),
+    // Per vertex, not per segment: gl.LINES advances attributes once per
+    // vertex, so a per-segment buffer is half the size the draw demands and
+    // WebGL drops the call outright. Left zeroed, which is black -- the one
+    // colour zone outlines ever take.
+    borderColors: new Uint8Array((border.length / 2) * 3),
     // Measured off the fill triangles: they cover the polygon's interior, so
     // their extent is the row's extent, and the border traces the same rings.
     rowBounds: boundsPerRow(
@@ -250,7 +252,6 @@ export function makeSegments(geometries: RawGeometry[], origin: Origin): Segment
     rowCount: geometries.length,
     positions: flat,
     rowIndex: rows,
-    colors: new Uint8Array(segmentCount * 3),
     rowBounds: boundsPerRow(
       geometries.length,
       segmentCount,
@@ -343,17 +344,16 @@ export function makePoints(geometries: RawGeometry[], origin: Origin): PointGeom
   return {
     rowCount: geometries.length,
     positions: new Float32Array(positions),
-    colors: new Uint8Array(geometries.length * 3),
   };
 }
 
-export function boundsOf(geometries: Geometries): Bounds | null {
+function boundsOfArrays(arrays: Float32Array[]): Bounds | null {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
 
-  const scan = (positions: Float32Array) => {
+  for (const positions of arrays) {
     for (let i = 0; i + 1 < positions.length; i += 2) {
       const x = positions[i];
       const y = positions[i + 1];
@@ -363,16 +363,44 @@ export function boundsOf(geometries: Geometries): Bounds | null {
       if (x > maxX) maxX = x;
       if (y > maxY) maxY = y;
     }
-  };
-
-  if (geometries.zones) scan(geometries.zones.fillPositions);
-  if (geometries.zones) scan(geometries.zones.borderPositions);
-  if (geometries.network) scan(geometries.network.positions);
-  if (geometries.agents) scan(geometries.agents.positions);
-  if (geometries.desireLines) {
-    for (const edges of geometries.desireLines.values()) scan(edges.positions);
   }
 
   if (minX > maxX || minY > maxY) return null;
   return { minX, minY, maxX, maxY };
+}
+
+function zoneArrays(geometries: Geometries): Float32Array[] {
+  return geometries.zones ? [geometries.zones.fillPositions, geometries.zones.borderPositions] : [];
+}
+
+export function boundsOf(geometries: Geometries): Bounds | null {
+  return boundsOfArrays([
+    ...zoneArrays(geometries),
+    ...(geometries.network ? [geometries.network.positions] : []),
+    ...(geometries.agents ? [geometries.agents.positions] : []),
+    ...(geometries.desireLines ? [...geometries.desireLines.values()].map(e => e.positions) : []),
+  ]);
+}
+
+// The extent of just the layer a mode draws, rather than of everything
+// loaded. A network reaching well past the zones would otherwise leave the
+// zones a speck in a corner while zones mode is showing -- the fitted view
+// should frame what's actually on screen.
+//
+// Measured over the whole mode, not the selected resource, so switching
+// resource doesn't jump the view out from under the reader. With no mode
+// chosen there's nothing but the hollow basemap, so zones is the answer.
+export function boundsForMode(
+  geometries: Geometries,
+  mode: 'zones' | 'desire_lines' | 'agents' | 'network' | null,
+): Bounds | null {
+  const own =
+    mode === 'network' && geometries.network ? [geometries.network.positions]
+    : mode === 'agents' && geometries.agents ? [geometries.agents.positions]
+    : mode === 'desire_lines' && geometries.desireLines
+      ? [...geometries.desireLines.values()].map(e => e.positions)
+    : mode === 'zones' ? zoneArrays(geometries)
+    : [];
+
+  return boundsOfArrays(own.length ? own : zoneArrays(geometries)) ?? boundsOf(geometries);
 }

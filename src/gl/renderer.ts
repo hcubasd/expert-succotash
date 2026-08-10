@@ -3,18 +3,82 @@ import type { RgbColor } from '../lib/colors';
 import type { Geometries } from '../lib/geometryMaker';
 import {
   FLAT_FRAG, FLAT_VERT,
-  HUE_FRAG, HUE_VERT,
+  HUE_FRAG,
   POINT_FRAG, POINT_VERT,
   RESOLVE_FRAG, RESOLVE_VERT,
+  THICK_HUE_VERT, THICK_VERT,
 } from './shaders';
 
 export type View = { centerX: number; centerY: number; scaleX: number; scaleY: number };
 
-// In CSS pixels, not device pixels: the canvas backing store is scaled up by
-// devicePixelRatio, so a radius measured against it directly would come out
-// half-size on a 2x display instead of the same apparent size at twice the
-// sharpness. Callers pass the ratio in and it's applied at the uniform.
-const AGENT_RADIUS_CSS_PX = 2.5;
+// All sizes here are CSS pixels, not device pixels: the canvas backing store
+// is scaled up by devicePixelRatio, so a size measured against it directly
+// would come out half as big on a 2x display instead of the same apparent
+// size at twice the sharpness. The ratio is applied at the uniform.
+
+// Marks compete for a fixed area. fitView always scales the whole dataset to
+// the canvas, so world density divides out entirely -- two datasets with the
+// same count fill the screen identically however far apart their coordinates
+// are. The only thing left varying is how many marks share that area, so
+// count is the complete driver at zoom 1, not a stand-in for something
+// better.
+//
+// One decay law for every mark type -- lines and agent radii both use this,
+// `initial` (the size at count 0) the only thing that differs between them.
+// Naturally bounded in (1, initial] with no explicit clamp: ln grows without
+// bound as count grows, so the reciprocal -- and the whole expression --
+// shrinks toward 1 (never quite reaching it), which also doubles as the
+// antialiasing floor: below about a pixel the quad only partially covers
+// its pixels and blends toward the background, the colour dilution that
+// made thin lines hard to tell apart in the first place. At count 0 the
+// e^(1/(initial-1)) term is chosen so the expression evaluates to exactly
+// `initial` -- lines use initial=2, which is why 1 + 1/ln(count+e) is the
+// same formula with that substitution already made.
+function countDecay(count: number, initial: number): number {
+  return 1 + 1 / Math.log(count + Math.exp(1 / (initial - 1)));
+}
+
+// The size at count 0 -- one mark alone on an empty map, with no crowding
+// to shrink it, which is also what every mark converges to as the view
+// closes in. Lines: exact, given. Agents: chosen aggressively, not derived
+// -- a lone agent should read as unmistakably a single point.
+const LINE_INITIAL_CSS_PX = 2;
+const AGENT_INITIAL_CSS_PX = 32;
+
+// Zoom interpolates from the count-driven baseline up to `initial`, rather
+// than multiplying it. The distinction matters: a multiplier running 1 ->
+// initial would scale the baseline *by* initial and overshoot it by however
+// far the baseline sits above 1. Approaching `initial` from below can't
+// overshoot, and is exact at both ends -- the baseline at zoom 1, `initial`
+// in the limit.
+//
+// The fraction of the remaining gap closed is 1 - 1/zoom, which has no
+// count in it at all: every layer is half way there at 2x and 90% there at
+// 10x, however crowded it is. Crowding sets where the walk starts, never
+// how fast it travels.
+export function markSize(count: number, initial: number, zoom: number): number {
+  const baseline = countDecay(count, initial);
+  return initial - (initial - baseline) / Math.max(zoom, 1);
+}
+
+// What a single, uncrossed desire line is worth, as a function of how far
+// the view has closed in. This is the floor the layer builds up from, not a
+// ceiling it is scaled down to: crossings composite above it toward opaque.
+// At the fitted view the layer is a dense mat, so one line is only worth
+// about 24% and pile-up is what reads; zooming in thins the crossings out
+// on its own, so a line is worth more and more on its own account. Bounded
+// in (0, 1) with no clamp -- ln grows without bound, so the reciprocal
+// decays to 0 and this never reaches or passes 1.
+export function lineOpacity(zoom: number): number {
+  return 1 - 1 / Math.log(Math.max(zoom, 1) + Math.E);
+}
+
+// Zone borders trace one shape's own outline rather than competing as N
+// independent marks, so neither law has any claim on them -- there is no
+// "N borders fighting for attention" the way there is for lines or points,
+// and no reason their width should track the view either. Left as a flat
+// constant on purpose, at every count and every zoom level.
+const ZONE_BORDER_CSS_PX = 1;
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type)!;
@@ -61,11 +125,20 @@ export class MapRenderer {
   private gl: WebGL2RenderingContext;
   private flat: WebGLProgram;
   private points: WebGLProgram;
-  private hue: WebGLProgram;
+  private thick: WebGLProgram;
+  private thickHue: WebGLProgram;
   private resolve: WebGLProgram;
   private quad: WebGLBuffer;
   private wheelTexture: WebGLTexture;
-  private accumulator: { framebuffer: WebGLFramebuffer; texture: WebGLTexture; width: number; height: number } | null = null;
+  private accumulator: {
+    // Equal to resolveFramebuffer when multisampling wasn't available.
+    drawFramebuffer: WebGLFramebuffer;
+    resolveFramebuffer: WebGLFramebuffer;
+    renderbuffer: WebGLRenderbuffer | null;
+    texture: WebGLTexture;
+    width: number;
+    height: number;
+  } | null = null;
   private uploaded = new Map<string, Buffers>();
   private floatTargetsSupported: boolean;
   // Which luminance the wheel texture currently holds, so a repeated
@@ -74,6 +147,11 @@ export class MapRenderer {
   private wheelLuminance: number | null = null;
 
   constructor(canvas: HTMLCanvasElement, luminance: number) {
+    // On: lines are real geometry now, so most of a line's cross-section is
+    // interior that renders at full color either way, and the softening is
+    // confined to a thin strip along each edge. That also buys back the
+    // smoothing on agent dots and zone fill edges, which is the same single
+    // context-wide switch.
     const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
     if (!gl) throw new Error('WebGL2 is not available');
     this.gl = gl;
@@ -85,7 +163,10 @@ export class MapRenderer {
 
     this.flat = link(gl, FLAT_VERT, FLAT_FRAG);
     this.points = link(gl, POINT_VERT, POINT_FRAG);
-    this.hue = link(gl, HUE_VERT, HUE_FRAG);
+    // Both thick programs reuse the existing fragment shaders unchanged --
+    // widening a line is entirely a vertex-stage concern.
+    this.thick = link(gl, THICK_VERT, FLAT_FRAG);
+    this.thickHue = link(gl, THICK_HUE_VERT, HUE_FRAG);
     this.resolve = link(gl, RESOLVE_VERT, RESOLVE_FRAG);
 
     this.quad = gl.createBuffer()!;
@@ -178,6 +259,74 @@ export class MapRenderer {
     gl.uniform2f(gl.getUniformLocation(program, 'u_scale'), view.scaleX, view.scaleY);
   }
 
+  // Binds the unit quad plus the start/end pair of each segment. The two
+  // endpoints come from one buffer read at two offsets of the same stride,
+  // because the segment buffer is already laid out x1,y1,x2,y2 per segment.
+  private bindSegments(program: WebGLProgram, positions: WebGLBuffer, view: View, width: number, height: number) {
+    const gl = this.gl;
+    gl.useProgram(program);
+    this.setTransform(program, view);
+    gl.uniform2f(gl.getUniformLocation(program, 'u_halfViewport'), width / 2, height / 2);
+
+    const cornerLoc = gl.getAttribLocation(program, 'a_corner');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.enableVertexAttribArray(cornerLoc);
+    gl.vertexAttribPointer(cornerLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(cornerLoc, 0);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, positions);
+    const startLoc = gl.getAttribLocation(program, 'a_start');
+    gl.enableVertexAttribArray(startLoc);
+    gl.vertexAttribPointer(startLoc, 2, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribDivisor(startLoc, 1);
+
+    const endLoc = gl.getAttribLocation(program, 'a_end');
+    gl.enableVertexAttribArray(endLoc);
+    gl.vertexAttribPointer(endLoc, 2, gl.FLOAT, false, 16, 8);
+    gl.vertexAttribDivisor(endLoc, 1);
+
+    return { startLoc, endLoc };
+  }
+
+  // Divisors live on the shared default VAO, so anything set to 1 has to go
+  // back to 0 or the next draw inherits it.
+  private clearDivisors(...locations: number[]) {
+    for (const location of locations) {
+      if (location >= 0) this.gl.vertexAttribDivisor(location, 0);
+    }
+  }
+
+  private drawThickLines(
+    key: string,
+    positions: Float32Array,
+    colors: Uint8Array,
+    view: View,
+    width: number,
+    height: number,
+    colorVersion: number,
+    pixelRatio: number,
+    widthCssPx: number,
+  ) {
+    if (positions.length === 0) return;
+    const gl = this.gl;
+    const entry = this.buffers(key, positions, colors, colorVersion);
+
+    const { startLoc, endLoc } = this.bindSegments(this.thick, entry.position, view, width, height);
+    gl.uniform1f(
+      gl.getUniformLocation(this.thick, 'u_halfWidth'),
+      (widthCssPx * pixelRatio) / 2,
+    );
+
+    const colorLoc = gl.getAttribLocation(this.thick, 'a_color');
+    gl.bindBuffer(gl.ARRAY_BUFFER, entry.color);
+    gl.enableVertexAttribArray(colorLoc);
+    gl.vertexAttribPointer(colorLoc, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+    gl.vertexAttribDivisor(colorLoc, 1);
+
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, positions.length / 4);
+    this.clearDivisors(startLoc, endLoc, colorLoc);
+  }
+
   private drawFlat(
     key: string,
     positions: Float32Array,
@@ -214,6 +363,7 @@ export class MapRenderer {
     height: number,
     colorVersion: number,
     pixelRatio: number,
+    radiusCssPx: number,
   ) {
     if (positions.length === 0) return;
     const gl = this.gl;
@@ -221,10 +371,10 @@ export class MapRenderer {
 
     gl.useProgram(this.points);
     this.setTransform(this.points, view);
-    // Radius is specified in pixels, so agents keep a constant on-screen size
-    // no matter how far the view is zoomed in. width/height are the backing
-    // store's device pixels, so the CSS radius is scaled by the ratio first.
-    const radius = AGENT_RADIUS_CSS_PX * pixelRatio;
+    // Radius is in pixels, so agents don't grow with the world as the view
+    // zooms. width/height are the backing store's device pixels, so the CSS
+    // radius is scaled by the ratio first.
+    const radius = radiusCssPx * pixelRatio;
     gl.uniform2f(
       gl.getUniformLocation(this.points, 'u_pixelRadius'),
       (radius * 2) / width,
@@ -255,15 +405,31 @@ export class MapRenderer {
     gl.vertexAttribDivisor(colorLoc, 0);
   }
 
+  private disposeAccumulator() {
+    const gl = this.gl;
+    if (!this.accumulator) return;
+    gl.deleteFramebuffer(this.accumulator.resolveFramebuffer);
+    gl.deleteTexture(this.accumulator.texture);
+    if (this.accumulator.renderbuffer) gl.deleteRenderbuffer(this.accumulator.renderbuffer);
+    if (this.accumulator.drawFramebuffer !== this.accumulator.resolveFramebuffer) {
+      gl.deleteFramebuffer(this.accumulator.drawFramebuffer);
+    }
+    this.accumulator = null;
+  }
+
+  // Two targets, not one: `antialias: true` only ever applied to the default
+  // framebuffer, so accumulating into a plain offscreen texture meant the
+  // hue-blend path was the one thing on the map rendering with no
+  // multisampling at all -- hard stair-stepped edges on every colored desire
+  // line. Lines now accumulate into a multisampled renderbuffer and get
+  // blitted down into the texture the resolve pass samples.
   private ensureAccumulator(width: number, height: number) {
     const gl = this.gl;
     if (this.accumulator && this.accumulator.width === width && this.accumulator.height === height) {
       return this.accumulator;
     }
-    if (this.accumulator) {
-      gl.deleteFramebuffer(this.accumulator.framebuffer);
-      gl.deleteTexture(this.accumulator.texture);
-    }
+    this.disposeAccumulator();
+
     const texture = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, texture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, width, height, 0, gl.RGBA, gl.HALF_FLOAT, null);
@@ -272,12 +438,37 @@ export class MapRenderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
-    const framebuffer = gl.createFramebuffer()!;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    const resolveFramebuffer = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, resolveFramebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    this.accumulator = { framebuffer, texture, width, height };
+    // RGBA16F is only color-renderable via EXT_color_buffer_float, and
+    // multisampled storage in that format is a step further again, so this
+    // checks completeness rather than assuming: a driver that refuses it
+    // falls back to accumulating straight into the texture -- aliased, but
+    // exactly what the old code did, so never worse.
+    const samples = Math.min(4, gl.getParameter(gl.MAX_SAMPLES) as number);
+    let renderbuffer: WebGLRenderbuffer | null = null;
+    let drawFramebuffer = resolveFramebuffer;
+
+    if (samples > 1) {
+      renderbuffer = gl.createRenderbuffer()!;
+      gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer);
+      gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA16F, width, height);
+      const multisampled = gl.createFramebuffer()!;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, multisampled);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, renderbuffer);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) {
+        drawFramebuffer = multisampled;
+      } else {
+        gl.deleteFramebuffer(multisampled);
+        gl.deleteRenderbuffer(renderbuffer);
+        renderbuffer = null;
+      }
+    }
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.accumulator = { drawFramebuffer, resolveFramebuffer, renderbuffer, texture, width, height };
     return this.accumulator;
   }
 
@@ -294,6 +485,9 @@ export class MapRenderer {
     width: number,
     height: number,
     colorVersion: number,
+    pixelRatio: number,
+    widthCssPx: number,
+    zoom: number,
   ) {
     if (positions.length === 0) return;
     const gl = this.gl;
@@ -302,31 +496,49 @@ export class MapRenderer {
     const entry = this.buffers('desireLinesBlend', positions, colors, colorVersion, hues);
     const target = this.ensureAccumulator(width, height);
 
-    gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.drawFramebuffer);
     gl.viewport(0, 0, width, height);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);
 
-    gl.useProgram(this.hue);
-    this.setTransform(this.hue, view);
+    const { startLoc, endLoc } = this.bindSegments(this.thickHue, entry.position, view, width, height);
+    gl.uniform1f(
+      gl.getUniformLocation(this.thickHue, 'u_halfWidth'),
+      (widthCssPx * pixelRatio) / 2,
+    );
 
-    const positionLoc = gl.getAttribLocation(this.hue, 'a_position');
-    gl.bindBuffer(gl.ARRAY_BUFFER, entry.position);
-    gl.enableVertexAttribArray(positionLoc);
-    gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
-
-    const hueLoc = gl.getAttribLocation(this.hue, 'a_hue');
+    const hueLoc = gl.getAttribLocation(this.thickHue, 'a_hue');
     gl.bindBuffer(gl.ARRAY_BUFFER, entry.hue!);
     gl.enableVertexAttribArray(hueLoc);
     gl.vertexAttribPointer(hueLoc, 1, gl.UNSIGNED_BYTE, false, 0, 0);
+    gl.vertexAttribDivisor(hueLoc, 1);
 
-    gl.drawArrays(gl.LINES, 0, entry.vertexCount);
-
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, positions.length / 4);
+    this.clearDivisors(startLoc, endLoc, hueLoc);
     gl.disable(gl.BLEND);
+
+    // Average the samples down into the texture the resolve pass reads.
+    // Averaging a summed hue vector against uncovered zeroes scales its
+    // magnitude but leaves its angle alone, and the resolve only reads the
+    // angle -- so the circular mean survives multisampling untouched.
+    if (target.drawFramebuffer !== target.resolveFramebuffer) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.drawFramebuffer);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, target.resolveFramebuffer);
+      gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    }
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, width, height);
+
+    // The resolve now emits partial coverage as alpha, so it has to blend
+    // against the scene underneath -- drawing it opaque would put every
+    // edge pixel back to fully hard and waste the multisampling entirely.
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     gl.useProgram(this.resolve);
     gl.activeTexture(gl.TEXTURE0);
@@ -335,12 +547,14 @@ export class MapRenderer {
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, this.wheelTexture);
     gl.uniform1i(gl.getUniformLocation(this.resolve, 'u_wheel'), 1);
+    gl.uniform1f(gl.getUniformLocation(this.resolve, 'u_opacity'), lineOpacity(zoom));
 
     const cornerLoc = gl.getAttribLocation(this.resolve, 'a_corner');
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.enableVertexAttribArray(cornerLoc);
     gl.vertexAttribPointer(cornerLoc, 2, gl.FLOAT, false, 0, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.disable(gl.BLEND);
   }
 
   render(
@@ -351,6 +565,8 @@ export class MapRenderer {
     blendDesireLines: boolean,
     colorVersion: number,
     pixelRatio: number,
+    // 1 at the fitted view, 2 when the view has closed in twice as far.
+    zoom: number,
   ) {
     const gl = this.gl;
     const width = gl.drawingBufferWidth;
@@ -363,25 +579,44 @@ export class MapRenderer {
     gl.disable(gl.BLEND);
 
     // Fixed stacking: zones behind, one line layer over them, agents on top.
+    // Only the polygon fill is still plain triangles -- everything linear
+    // goes through the instanced quad path.
     if (geometries.zones) {
       this.drawFlat('zoneFill', geometries.zones.fillPositions, geometries.zones.fillColors, gl.TRIANGLES, view, colorVersion);
-      this.drawFlat('zoneBorder', geometries.zones.borderPositions, geometries.zones.borderColors, gl.LINES, view, colorVersion);
+      this.drawThickLines(
+        'zoneBorder', geometries.zones.borderPositions, geometries.zones.borderColors,
+        view, width, height, colorVersion, pixelRatio, ZONE_BORDER_CSS_PX,
+      );
     }
 
+    // Counts are of drawn primitives -- segments, not rows -- since that's
+    // what actually shares the screen.
     if (lineLayer === 'network' && geometries.network) {
-      this.drawFlat('network', geometries.network.positions, geometries.network.colors, gl.LINES, view, colorVersion);
+      const network = geometries.network;
+      this.drawThickLines(
+        'network', network.positions, network.colors, view, width, height, colorVersion, pixelRatio,
+        markSize(network.positions.length / 4, LINE_INITIAL_CSS_PX, zoom),
+      );
     } else if (lineLayer === 'desireLines' && geometries.desireLines) {
       const lines = geometries.desireLines;
+      const lineWidth = markSize(lines.positions.length / 4, LINE_INITIAL_CSS_PX, zoom);
       if (blendDesireLines && this.floatTargetsSupported) {
-        this.drawBlendedLines(lines.positions, lines.hues, lines.colors, view, width, height, colorVersion);
+        this.drawBlendedLines(
+          lines.positions, lines.hues, lines.colors, view, width, height, colorVersion, pixelRatio,
+          lineWidth, zoom,
+        );
       } else {
-        this.drawFlat('desireLines', lines.positions, lines.colors, gl.LINES, view, colorVersion);
+        this.drawThickLines(
+          'desireLines', lines.positions, lines.colors, view, width, height, colorVersion, pixelRatio, lineWidth,
+        );
       }
     }
 
     if (geometries.agents) {
+      const agents = geometries.agents;
       this.drawPoints(
-        geometries.agents.positions, geometries.agents.colors, view, width, height, colorVersion, pixelRatio,
+        agents.positions, agents.colors, view, width, height, colorVersion, pixelRatio,
+        markSize(agents.positions.length / 2, AGENT_INITIAL_CSS_PX, zoom),
       );
     }
   }
@@ -391,13 +626,11 @@ export class MapRenderer {
     this.invalidate();
     gl.deleteBuffer(this.quad);
     gl.deleteTexture(this.wheelTexture);
-    if (this.accumulator) {
-      gl.deleteFramebuffer(this.accumulator.framebuffer);
-      gl.deleteTexture(this.accumulator.texture);
-    }
+    this.disposeAccumulator();
     gl.deleteProgram(this.flat);
     gl.deleteProgram(this.points);
-    gl.deleteProgram(this.hue);
+    gl.deleteProgram(this.thick);
+    gl.deleteProgram(this.thickHue);
     gl.deleteProgram(this.resolve);
   }
 }

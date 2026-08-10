@@ -13,26 +13,30 @@ const square = (): RawGeometry => ({ type: 'Polygon', coordinates: squareRings }
 describe('makeSegments', () => {
   it('flattens a two-point line into one segment', () => {
     const g = makeSegments([line([[0, 0], [1, 1]])], ZERO_ORIGIN);
+    // x1,y1,x2,y2 -- which doubles as the per-instance attribute layout,
+    // start at byte 0 and end at byte 8 of one 16-byte stride.
     expect(Array.from(g.positions)).toEqual([0, 0, 1, 1]);
-    expect(Array.from(g.rowIndex)).toEqual([0, 0]);
+    expect(Array.from(g.rowIndex)).toEqual([0]);
   });
 
   it('decomposes a polyline into one segment per span, all tagged to its row', () => {
     const g = makeSegments([line([[0, 0], [1, 0], [2, 0]])], ZERO_ORIGIN);
-    // two segments, four vertices, every one belonging to row 0
-    expect(g.positions.length / 2).toBe(4);
-    expect(Array.from(g.rowIndex)).toEqual([0, 0, 0, 0]);
+    expect(g.positions.length / 4).toBe(2);
+    expect(Array.from(g.rowIndex)).toEqual([0, 0]);
   });
 
-  it('allocates a color and a hue slot per vertex', () => {
-    const g = makeSegments([line([[0, 0], [1, 1]])], ZERO_ORIGIN);
-    expect(g.colors.length).toBe(6);
-    expect(g.hues.length).toBe(2);
+  it('allocates a color and a hue slot per segment, not per vertex', () => {
+    const g = makeSegments([line([[0, 0], [1, 0], [2, 0]])], ZERO_ORIGIN);
+    const segments = g.positions.length / 4;
+    expect(segments).toBe(2);
+    // one instance, one color: a line cannot be a gradient even in principle
+    expect(g.colors.length).toBe(segments * 3);
+    expect(g.hues.length).toBe(segments);
   });
 
   it('keeps row indices distinct across several lines', () => {
     const g = makeSegments([line([[0, 0], [1, 1]]), line([[2, 2], [3, 3]])], ZERO_ORIGIN);
-    expect(Array.from(g.rowIndex)).toEqual([0, 0, 1, 1]);
+    expect(Array.from(g.rowIndex)).toEqual([0, 1]);
   });
 
   it('decomposes every span of a MultiLineString under the same row', () => {

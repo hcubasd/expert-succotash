@@ -62,8 +62,9 @@ describe('applyMapColors', () => {
     const geometries = scene();
     applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, true);
 
+    // one color per segment now, so segment 1 starts at byte 3, not 6
     const first = Array.from(geometries.network!.colors.slice(0, 3));
-    const second = Array.from(geometries.network!.colors.slice(6, 9));
+    const second = Array.from(geometries.network!.colors.slice(3, 6));
     expect(first).not.toEqual(INK);
     // two links, two road types -- so the two segments must differ
     expect(first).not.toEqual(second);
@@ -77,12 +78,16 @@ describe('applyMapColors', () => {
     expect(Array.from(geometries.desireLines!.colors.slice(0, 3))).toEqual(INK);
   });
 
-  it('gives both vertices of a segment the same color, so a line is never a gradient', () => {
+  it('writes exactly one color per segment, so a line cannot be a gradient', () => {
     MAP_DRIVERS.network = { road_type: 'network' };
     const geometries = scene();
     applyMapColors(geometries, { network: networkTable }, { table: 'network', column: 'road_type' }, true);
-    expect(Array.from(geometries.network!.colors.slice(0, 3)))
-      .toEqual(Array.from(geometries.network!.colors.slice(3, 6)));
+    const network = geometries.network!;
+    // the segment is the draw instance, so there is no second vertex to
+    // disagree with the first -- the old per-vertex hazard is gone by
+    // construction rather than by being written carefully
+    expect(network.colors.length).toBe((network.positions.length / 4) * 3);
+    expect(network.hues.length).toBe(network.positions.length / 4);
   });
 
   it('flips ink and paper with the mode, so light mode is the mirror', () => {

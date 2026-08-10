@@ -114,8 +114,13 @@ export default function Map({
     const renderer = rendererRef.current;
     if (!renderer || size.width === 0) return;
     renderer.setLuminance(dark ? LUMINANCE_DARK : LUMINANCE_LIGHT);
+    // How far in the view has closed relative to the fitted one, which is
+    // what mark sizing scales against. The fit is the same cheap arithmetic
+    // the view itself is built from, so this needs nothing kept in sync.
+    const fitted = fitView(bounds, size.width, size.height).scaleX;
+    const zoom = fitted > 0 ? viewRef.current.scaleX / fitted : 1;
     renderer.render(
-      geometries, viewRef.current, paperOf(dark), lineLayer, blendDesireLines, colorVersion, size.ratio,
+      geometries, viewRef.current, paperOf(dark), lineLayer, blendDesireLines, colorVersion, size.ratio, zoom,
     );
   });
 

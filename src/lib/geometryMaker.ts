@@ -76,21 +76,26 @@ export type PolygonGeometry = {
   // Ring edges as explicit vertex pairs, so every polygon's border batches
   // into a single draw call (LINE_LOOP would need one call per ring).
   borderPositions: Float32Array;
+  // Per segment, not per vertex -- see SegmentGeometry.
   borderRowIndex: Uint32Array;
   borderColors: Uint8Array;
 };
 
 export type SegmentGeometry = {
   rowCount: number;
-  // Two vertices per segment. A polyline is decomposed into its segments here
-  // rather than at render time: gl.LINES only ever wants segments, and doing
-  // it once means the renderer never needs polyline-aware logic.
+  // Endpoint pairs, x1,y1,x2,y2 per segment. A polyline is decomposed into
+  // its segments here rather than at render time, which also means this
+  // doubles as the per-instance attribute layout: start reads at offset 0
+  // and end at offset 8 of the same 16-byte stride.
   positions: Float32Array;
+  // One entry per segment -- the segment is the instance, so a color can't
+  // vary along a line even in principle.
   rowIndex: Uint32Array;
   colors: Uint8Array;
-  // Wheel index per vertex, for the hue-averaging blend path. Kept alongside
-  // rgb rather than instead of it because the two render paths want different
-  // things: opaque drawing wants color, accumulation wants an angle.
+  // Wheel index per segment, for the hue-averaging blend path. Kept
+  // alongside rgb rather than instead of it because the two render paths
+  // want different things: opaque drawing wants color, accumulation wants
+  // an angle.
   hues: Uint8Array;
 };
 
@@ -149,7 +154,7 @@ export function makePolygons(geometries: RawGeometry[], origin: Origin): Polygon
           const [x1, y1] = ring[i];
           const [x2, y2] = ring[(i + 1) % ring.length];
           border.push(x1 - origin.x, y1 - origin.y, x2 - origin.x, y2 - origin.y);
-          borderRow.push(row, row);
+          borderRow.push(row);
         }
       }
     }
@@ -162,7 +167,7 @@ export function makePolygons(geometries: RawGeometry[], origin: Origin): Polygon
     fillColors: new Uint8Array((fill.length / 2) * 3),
     borderPositions: new Float32Array(border),
     borderRowIndex: new Uint32Array(borderRow),
-    borderColors: new Uint8Array((border.length / 2) * 3),
+    borderColors: new Uint8Array((border.length / 4) * 3),
   };
 }
 
@@ -184,18 +189,18 @@ export function makeSegments(geometries: RawGeometry[], origin: Origin): Segment
         const [x1, y1] = coords[i];
         const [x2, y2] = coords[i + 1];
         positions.push(x1 - origin.x, y1 - origin.y, x2 - origin.x, y2 - origin.y);
-        rowIndex.push(row, row);
+        rowIndex.push(row);
       }
     }
   });
 
-  const vertexCount = positions.length / 2;
+  const segmentCount = positions.length / 4;
   return {
     rowCount: geometries.length,
     positions: new Float32Array(positions),
     rowIndex: new Uint32Array(rowIndex),
-    colors: new Uint8Array(vertexCount * 3),
-    hues: new Uint8Array(vertexCount),
+    colors: new Uint8Array(segmentCount * 3),
+    hues: new Uint8Array(segmentCount),
   };
 }
 

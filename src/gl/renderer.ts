@@ -83,6 +83,17 @@ export class MapRenderer {
   private accum: WebGLProgram;
   private resolve: WebGLProgram;
   private quad: WebGLBuffer;
+  // One vertex array per draw path. Enabled attribute arrays and their
+  // divisors are otherwise global state: the agent pass enables arrays at
+  // the point program's locations, and those stay enabled -- still bound to
+  // small per-agent buffers -- when a later pass draws far more vertices
+  // through a program whose attributes sit at different locations. The draw
+  // then fails validation and renders nothing, and stays broken until the
+  // context is thrown away. A vertex array scopes all of that per path.
+  private flatVao: WebGLVertexArrayObject;
+  private pointsVao: WebGLVertexArrayObject;
+  private accumVao: WebGLVertexArrayObject;
+  private resolveVao: WebGLVertexArrayObject;
   private cdfTexture: WebGLTexture;
   private rampTexture: WebGLTexture;
   private accumulator: {
@@ -116,6 +127,11 @@ export class MapRenderer {
     this.quad = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+
+    this.flatVao = gl.createVertexArray()!;
+    this.pointsVao = gl.createVertexArray()!;
+    this.accumVao = gl.createVertexArray()!;
+    this.resolveVao = gl.createVertexArray()!;
 
     this.cdfTexture = this.makeLookup(gl.R32F, CDF_BINS);
     this.rampTexture = this.makeLookup(gl.RGBA8, 128);
@@ -184,6 +200,7 @@ export class MapRenderer {
     if (positions.length === 0) return;
     const gl = this.gl;
 
+    gl.bindVertexArray(this.flatVao);
     gl.useProgram(this.flat);
     this.setTransform(this.flat, view);
 
@@ -199,6 +216,7 @@ export class MapRenderer {
 
     gl.drawArrays(mode, 0, positions.length / 2);
     this.checkError(key);
+    gl.bindVertexArray(null);
   }
 
   private drawAgents(
@@ -213,6 +231,7 @@ export class MapRenderer {
     if (positions.length === 0) return;
     const gl = this.gl;
 
+    gl.bindVertexArray(this.pointsVao);
     gl.useProgram(this.points);
     this.setTransform(this.points, view);
     const radius = radiusCssPx * pixelRatio;
@@ -242,11 +261,7 @@ export class MapRenderer {
 
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, positions.length / 2);
     this.checkError('agents');
-
-    // Divisors live on the shared default VAO, so anything set to 1 has to
-    // go back to 0 or the next draw inherits it.
-    gl.vertexAttribDivisor(positionLoc, 0);
-    gl.vertexAttribDivisor(colorLoc, 0);
+    gl.bindVertexArray(null);
   }
 
   private ensureAccumulator(width: number, height: number) {
@@ -334,6 +349,7 @@ export class MapRenderer {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE);
 
+    gl.bindVertexArray(this.accumVao);
     gl.useProgram(this.accum);
     this.setTransform(this.accum, view);
 
@@ -356,6 +372,7 @@ export class MapRenderer {
 
     gl.drawArrays(gl.LINES, 0, layer.positions.length / 2);
     this.checkError('desire-line accumulation');
+    gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
 
     if (target.drawFramebuffer !== target.resolveFramebuffer) {
@@ -420,6 +437,7 @@ export class MapRenderer {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
+    gl.bindVertexArray(this.resolveVao);
     gl.useProgram(this.resolve);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, target.texture);
@@ -438,6 +456,7 @@ export class MapRenderer {
     gl.vertexAttribPointer(cornerLoc, 2, gl.FLOAT, false, 0, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this.checkError('desire-line resolve');
+    gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
     gl.activeTexture(gl.TEXTURE0);
 
@@ -494,6 +513,10 @@ export class MapRenderer {
     const gl = this.gl;
     this.invalidate();
     gl.deleteBuffer(this.quad);
+    gl.deleteVertexArray(this.flatVao);
+    gl.deleteVertexArray(this.pointsVao);
+    gl.deleteVertexArray(this.accumVao);
+    gl.deleteVertexArray(this.resolveVao);
     gl.deleteTexture(this.cdfTexture);
     gl.deleteTexture(this.rampTexture);
     this.disposeAccumulator();

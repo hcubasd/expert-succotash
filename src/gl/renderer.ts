@@ -30,6 +30,7 @@ export type Scene = {
 export type FlowStats = { max: number; cdf: Float32Array };
 
 const CDF_BINS = 256;
+const AGENT_BORDER_DEVICE_PX = 1;
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type)!;
@@ -240,6 +241,11 @@ export class MapRenderer {
       (radius * 2) / width,
       (radius * 2) / height,
     );
+    // The border eats into the fixed radius rather than adding to it, so the
+    // no-two-circles-overlap guarantee thinAgents already enforces at that
+    // radius keeps holding once a border is drawn. One device pixel, same as
+    // every other stroke in the app.
+    gl.uniform1f(gl.getUniformLocation(this.points, 'u_borderFrac'), Math.min(1, AGENT_BORDER_DEVICE_PX / radius));
 
     const cornerLoc = gl.getAttribLocation(this.points, 'a_corner');
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);

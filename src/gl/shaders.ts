@@ -63,12 +63,16 @@ export const POINT_FRAG = `#version 300 es
   precision highp float;
   in vec3 v_color;
   in vec2 v_corner;
+  uniform float u_borderFrac;
   out vec4 outColor;
   void main() {
     // Round the quad off into a disc; anything outside never becomes a
-    // fragment at all, so agents need no outline geometry of their own.
-    if (dot(v_corner, v_corner) > 1.0) discard;
-    outColor = vec4(v_color, 1.0);
+    // fragment at all, so the border below needs no outline geometry of its
+    // own either -- it's the same disc, just recoloured near its own edge.
+    float d = length(v_corner);
+    if (d > 1.0) discard;
+    vec3 color = d > 1.0 - u_borderFrac ? vec3(0.0) : v_color;
+    outColor = vec4(color, 1.0);
   }
 `;
 

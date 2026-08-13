@@ -95,17 +95,19 @@ export type ThinnedAgents = {
   radiusCssPx: number;
 };
 
-// One diameter for every agent on screen, and no two drawn circles allowed to
-// overlap.
-//
-// The diameter comes from the most central agent's nearest neighbour: it is a
-// single measurement of how tightly this data packs where it packs hardest,
-// and using one global number keeps identical data from rendering at a dozen
-// different sizes. Agents are then walked outward from the centroid, and one
-// that would land within a diameter of something already placed is dropped --
-// it would only repaint pixels already spoken for. What survives at extreme
-// density is a tight cluster of separate coloured dots, which is the honest
-// picture of "a lot packed into a small area".
+// One diameter for every agent on screen, fixed in CSS pixels so it never
+// grows or shrinks with zoom -- the same dot at every scale, not a Google
+// Maps-style explode-on-zoom-in. Agents are still walked outward from the
+// centroid, and one that would land within a diameter of something already
+// placed is dropped -- it would only repaint pixels already spoken for. What
+// survives at extreme density is a tight cluster of separate coloured dots,
+// which is the honest picture of "a lot packed into a small area". Zooming in
+// doesn't grow the dots, but it does spread the underlying data apart in
+// screen space, so more of it clears the fixed exclusion and gets drawn --
+// the re-thin on every zoom is still doing real work, it just isn't sizing
+// anything anymore.
+export const AGENT_DIAMETER_CSS_PX = 12;
+
 export function thinAgents(
   positions: Float32Array,
   values: Float64Array,
@@ -138,19 +140,11 @@ export function thinAgents(
     (positions[i * 2] - centroidX) ** 2 + (positions[i * 2 + 1] - centroidY) ** 2;
 
   const ordered = [...candidates].sort((a, b) => distanceToCentroid(a) - distanceToCentroid(b));
-  const anchor = ordered[0];
 
-  let nearest = Infinity;
-  for (const i of candidates) {
-    if (i === anchor) continue;
-    const d = (positions[i * 2] - positions[anchor * 2]) ** 2 + (positions[i * 2 + 1] - positions[anchor * 2 + 1]) ** 2;
-    if (d < nearest) nearest = d;
-  }
-  const worldDiameter = Number.isFinite(nearest) ? Math.sqrt(nearest) : 0;
-
-  // Never below one device pixel: past that a circle has nothing left to
-  // draw, and the separation it was buying stops being visible anyway.
-  const deviceDiameter = Math.max(worldDiameter * pixelsPerUnit, 1);
+  // The fixed diameter, converted into this zoom's world units so the grid
+  // and exclusion test below can stay in the coordinate space the positions
+  // already use.
+  const deviceDiameter = AGENT_DIAMETER_CSS_PX * pixelRatio;
   const exclusion = deviceDiameter / pixelsPerUnit;
 
   // A uniform grid at the exclusion radius: any agent close enough to
@@ -200,7 +194,7 @@ export function thinAgents(
   return {
     positions: keptPositions,
     values: keptValues,
-    radiusCssPx: deviceDiameter / 2 / pixelRatio,
+    radiusCssPx: AGENT_DIAMETER_CSS_PX / 2,
   };
 }
 

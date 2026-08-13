@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ZERO_ORIGIN, makeDesireLineEdges } from '../src/lib/geometryMaker';
 import type { RawGeometry } from '../src/lib/rawTable';
-import { thinAgents, viewportOf } from '../src/lib/mapScene';
+import { AGENT_DIAMETER_CSS_PX, thinAgents, viewportOf } from '../src/lib/mapScene';
 
 const line = (a: [number, number], b: [number, number]): RawGeometry => ({
   type: 'LineString',
@@ -61,29 +61,28 @@ describe('thinAgents', () => {
   const positions = Float32Array.from([0, 0, 1, 0, 2, 0, 3, 0]);
   const values = Float64Array.from([1, 2, 3, 4]);
 
-  it('keeps everything when the circles are small enough not to touch', () => {
-    // One device pixel per world unit: a diameter of 1 unit, so neighbours
-    // exactly touch and none is excluded.
-    const kept = thinAgents(positions, values, viewport, 1, 1);
+  it('keeps everything when zoomed in enough that the fixed dot no longer touches its neighbours', () => {
+    // 100 device pixels per world unit shrinks the fixed dot to a fraction
+    // of the 1-unit spacing, so nothing excludes anything.
+    const kept = thinAgents(positions, values, viewport, 100, 1);
     expect(kept.values.length).toBe(4);
   });
 
   it('drops the ones that would overlap when zoomed out', () => {
-    // A tenth of a pixel per world unit forces the one-device-pixel floor,
-    // which is ten world units wide -- wider than the whole row, so only
-    // the first agent survives.
+    // A tenth of a pixel per world unit blows the fixed dot up to 80 world
+    // units across -- wider than the whole row, so only the first survives.
     const kept = thinAgents(positions, values, viewport, 0.1, 1);
     expect(kept.values.length).toBe(1);
   });
 
   it('skips agents with no value for the selected resource entirely', () => {
     const sparse = Float64Array.from([1, NaN, NaN, 4]);
-    const kept = thinAgents(positions, sparse, viewport, 1, 1);
+    const kept = thinAgents(positions, sparse, viewport, 100, 1);
     expect(Array.from(kept.values)).toEqual([1, 4]);
   });
 
   it('ignores anything outside the viewport, so zooming re-thins what is left', () => {
-    const kept = thinAgents(positions, values, { minX: -0.5, maxX: 1.5, minY: -1, maxY: 1 }, 1, 1);
+    const kept = thinAgents(positions, values, { minX: -0.5, maxX: 1.5, minY: -1, maxY: 1 }, 100, 1);
     expect(Array.from(kept.values)).toEqual([1, 2]);
   });
 
@@ -100,9 +99,11 @@ describe('thinAgents', () => {
     }
   });
 
-  it('never goes below a single device pixel, whatever the zoom', () => {
-    const kept = thinAgents(positions, values, viewport, 1e-9, 1);
-    expect(kept.radiusCssPx * 2).toBeGreaterThanOrEqual(1);
+  it('keeps the exact same diameter at every zoom level, in or out', () => {
+    const zoomedIn = thinAgents(positions, values, viewport, 100, 1);
+    const zoomedOut = thinAgents(positions, values, viewport, 0.1, 1);
+    expect(zoomedIn.radiusCssPx).toBe(AGENT_DIAMETER_CSS_PX / 2);
+    expect(zoomedOut.radiusCssPx).toBe(zoomedIn.radiusCssPx);
   });
 
   it('has nothing to draw when no agent has a value', () => {

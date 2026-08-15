@@ -1,11 +1,13 @@
 import type { RgbColor } from '../lib/colors';
 import { binnedCdf } from '../lib/equalize';
-import type { PolygonGeometry, SegmentGeometry } from '../lib/geometryMaker';
+import type { PolygonGeometry } from '../lib/geometryMaker';
 import {
   ACCUM_FRAG, ACCUM_VERT,
   FLAT_FRAG, FLAT_VERT,
   POINT_FRAG, POINT_VERT,
+  FLOW_JOINT_FRAG, FLOW_JOINT_VERT,
   RESOLVE_FRAG, RESOLVE_VERT,
+  THICK_FRAG, THICK_VERT,
 } from './shaders';
 
 export type View = { centerX: number; centerY: number; scaleX: number; scaleY: number };
@@ -19,9 +21,24 @@ export type Scene = {
   // fillColors null means hollow: only the (always black, always 1px)
   // borders are drawn, and the white background shows through.
   zones: { geometry: PolygonGeometry; fillColors: Uint8Array | null } | null;
-  network: { geometry: SegmentGeometry; colors: Uint8Array } | null;
+  // Either the simplified virtual graph or the real links, whichever the
+  // view calls for -- both arrive as the same x1,y1,x2,y2 lines with one
+  // colour each, so the renderer doesn't need to know which it got.
+  // jointColors runs per endpoint rather than per line: where lines meet,
+  // the join is blended from all of them.
+  network: {
+    positions: Float32Array;
+    colors: Uint8Array;
+    jointColors: Uint8Array;
+    widthCssPx: number;
+  } | null;
   agents: { positions: Float32Array; colors: Uint8Array; radiusCssPx: number } | null;
-  desireLines: { positions: Float32Array; quantities: Float32Array; ramp: RgbColor[] } | null;
+  desireLines: {
+    positions: Float32Array;
+    quantities: Float32Array;
+    ramp: RgbColor[];
+    widthCssPx: number;
+  } | null;
 };
 
 // What the desire-line pass measured off this exact frame. The legend needs
@@ -30,7 +47,6 @@ export type Scene = {
 export type FlowStats = { max: number; cdf: Float32Array };
 
 const CDF_BINS = 256;
-const AGENT_BORDER_DEVICE_PX = 1;
 
 function compile(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type)!;
@@ -81,9 +97,14 @@ export class MapRenderer {
   private gl: WebGL2RenderingContext;
   private flat: WebGLProgram;
   private points: WebGLProgram;
+  private thick: WebGLProgram;
   private accum: WebGLProgram;
   private resolve: WebGLProgram;
+  private flowJoint: WebGLProgram;
   private quad: WebGLBuffer;
+  // The line quad runs 0..1 along the segment and -1..1 across it, so the
+  // vertex shader can place it by interpolating between the two endpoints.
+  private lineQuad: WebGLBuffer;
   // One vertex array per draw path. Enabled attribute arrays and their
   // divisors are otherwise global state: the agent pass enables arrays at
   // the point program's locations, and those stay enabled -- still bound to
@@ -93,8 +114,10 @@ export class MapRenderer {
   // context is thrown away. A vertex array scopes all of that per path.
   private flatVao: WebGLVertexArrayObject;
   private pointsVao: WebGLVertexArrayObject;
+  private thickVao: WebGLVertexArrayObject;
   private accumVao: WebGLVertexArrayObject;
   private resolveVao: WebGLVertexArrayObject;
+  private flowJointVao: WebGLVertexArrayObject;
   private cdfTexture: WebGLTexture;
   private rampTexture: WebGLTexture;
   private accumulator: {
@@ -122,17 +145,29 @@ export class MapRenderer {
 
     this.flat = link(gl, FLAT_VERT, FLAT_FRAG);
     this.points = link(gl, POINT_VERT, POINT_FRAG);
+    this.thick = link(gl, THICK_VERT, THICK_FRAG);
     this.accum = link(gl, ACCUM_VERT, ACCUM_FRAG);
     this.resolve = link(gl, RESOLVE_VERT, RESOLVE_FRAG);
+    this.flowJoint = link(gl, FLOW_JOINT_VERT, FLOW_JOINT_FRAG);
 
     this.quad = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
 
+    this.lineQuad = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineQuad);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([0, -1, 1, -1, 1, 1, 0, -1, 1, 1, 0, 1]),
+      gl.STATIC_DRAW,
+    );
+
     this.flatVao = gl.createVertexArray()!;
     this.pointsVao = gl.createVertexArray()!;
+    this.thickVao = gl.createVertexArray()!;
     this.accumVao = gl.createVertexArray()!;
     this.resolveVao = gl.createVertexArray()!;
+    this.flowJointVao = gl.createVertexArray()!;
 
     this.cdfTexture = this.makeLookup(gl.R32F, CDF_BINS);
     this.rampTexture = this.makeLookup(gl.RGBA8, 128);
@@ -220,7 +255,10 @@ export class MapRenderer {
     gl.bindVertexArray(null);
   }
 
-  private drawAgents(
+  // Instanced discs, used both for agent dots and for the round joins that
+  // cover the seam where two link quads meet at a shared endpoint.
+  private drawPoints(
+    key: string,
     positions: Float32Array,
     colors: Uint8Array,
     radiusCssPx: number,
@@ -241,11 +279,7 @@ export class MapRenderer {
       (radius * 2) / width,
       (radius * 2) / height,
     );
-    // The border eats into the fixed radius rather than adding to it, so the
-    // no-two-circles-overlap guarantee thinAgents already enforces at that
-    // radius keeps holding once a border is drawn. One device pixel, same as
-    // every other stroke in the app.
-    gl.uniform1f(gl.getUniformLocation(this.points, 'u_borderFrac'), Math.min(1, AGENT_BORDER_DEVICE_PX / radius));
+    gl.uniform1f(gl.getUniformLocation(this.points, 'u_radiusPx'), radius);
 
     const cornerLoc = gl.getAttribLocation(this.points, 'a_corner');
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
@@ -254,20 +288,82 @@ export class MapRenderer {
     gl.vertexAttribDivisor(cornerLoc, 0);
 
     const positionLoc = gl.getAttribLocation(this.points, 'a_position');
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload('agents:pos', positions, gl.DYNAMIC_DRAW));
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload(`${key}:pos`, positions, gl.DYNAMIC_DRAW));
     gl.enableVertexAttribArray(positionLoc);
     gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
     gl.vertexAttribDivisor(positionLoc, 1);
 
     const colorLoc = gl.getAttribLocation(this.points, 'a_color');
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload('agents:col', colors, gl.DYNAMIC_DRAW));
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload(`${key}:col`, colors, gl.DYNAMIC_DRAW));
     gl.enableVertexAttribArray(colorLoc);
     gl.vertexAttribPointer(colorLoc, 3, gl.UNSIGNED_BYTE, true, 0, 0);
     gl.vertexAttribDivisor(colorLoc, 1);
 
     gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, positions.length / 2);
-    this.checkError('agents');
+    this.checkError(key);
     gl.bindVertexArray(null);
+  }
+
+  // Triangulated lines: one instanced quad per segment, stretched along it
+  // and extruded across it in the vertex shader.
+  private drawThick(
+    key: string,
+    positions: Float32Array,
+    colors: Uint8Array,
+    widthCssPx: number,
+    view: View,
+    width: number,
+    height: number,
+    pixelRatio: number,
+  ) {
+    if (positions.length === 0) return;
+    const gl = this.gl;
+
+    gl.bindVertexArray(this.thickVao);
+    gl.useProgram(this.thick);
+    this.setTransform(this.thick, view);
+    gl.uniform2f(gl.getUniformLocation(this.thick, 'u_viewportPx'), width, height);
+    gl.uniform1f(gl.getUniformLocation(this.thick, 'u_halfWidthPx'), (widthCssPx * pixelRatio) / 2);
+
+    const cornerLoc = gl.getAttribLocation(this.thick, 'a_corner');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineQuad);
+    gl.enableVertexAttribArray(cornerLoc);
+    gl.vertexAttribPointer(cornerLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(cornerLoc, 0);
+
+    // Both endpoints come from one vec4 attribute: x1,y1,x2,y2 is already the
+    // buffer's layout, so a 16-byte stride reads a whole line per instance.
+    const endpointsLoc = gl.getAttribLocation(this.thick, 'a_endpoints');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload(`${key}:pos`, positions, gl.DYNAMIC_DRAW));
+    gl.enableVertexAttribArray(endpointsLoc);
+    gl.vertexAttribPointer(endpointsLoc, 4, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribDivisor(endpointsLoc, 1);
+
+    const colorLoc = gl.getAttribLocation(this.thick, 'a_color');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload(`${key}:col`, colors, gl.DYNAMIC_DRAW));
+    gl.enableVertexAttribArray(colorLoc);
+    gl.vertexAttribPointer(colorLoc, 3, gl.UNSIGNED_BYTE, true, 0, 0);
+    gl.vertexAttribDivisor(colorLoc, 1);
+
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, positions.length / 4);
+    this.checkError(key);
+    gl.bindVertexArray(null);
+  }
+
+  // Discs at every line endpoint, one line width across, so the flat-ended
+  // quads meeting at a shared point read as a join rather than a notch. The
+  // line buffer is already a list of x,y pairs, so it doubles as the join
+  // positions with no extra array.
+  private drawJoints(
+    positions: Float32Array,
+    colors: Uint8Array,
+    widthCssPx: number,
+    view: View,
+    width: number,
+    height: number,
+    pixelRatio: number,
+  ) {
+    this.drawPoints('joints', positions, colors, widthCssPx / 2, view, width, height, pixelRatio);
   }
 
   private ensureAccumulator(width: number, height: number) {
@@ -342,6 +438,7 @@ export class MapRenderer {
     view: View,
     width: number,
     height: number,
+    pixelRatio: number,
   ): FlowStats | null {
     const gl = this.gl;
     if (!this.floatTargetsSupported || layer.positions.length === 0) return null;
@@ -358,25 +455,30 @@ export class MapRenderer {
     gl.bindVertexArray(this.accumVao);
     gl.useProgram(this.accum);
     this.setTransform(this.accum, view);
+    gl.uniform2f(gl.getUniformLocation(this.accum, 'u_viewportPx'), width, height);
+    gl.uniform1f(gl.getUniformLocation(this.accum, 'u_halfWidthPx'), (layer.widthCssPx * pixelRatio) / 2);
 
-    const positionLoc = gl.getAttribLocation(this.accum, 'a_position');
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload('flow:pos', layer.positions, gl.STATIC_DRAW));
-    gl.enableVertexAttribArray(positionLoc);
-    gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 0, 0);
+    const cornerLoc = gl.getAttribLocation(this.accum, 'a_corner');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lineQuad);
+    gl.enableVertexAttribArray(cornerLoc);
+    gl.vertexAttribPointer(cornerLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(cornerLoc, 0);
 
-    // One quantity per edge, but gl.LINES advances attributes per vertex, so
-    // each edge's value is duplicated across its two endpoints.
-    const perVertex = new Float32Array(layer.quantities.length * 2);
-    for (let edge = 0; edge < layer.quantities.length; edge++) {
-      perVertex[edge * 2] = layer.quantities[edge];
-      perVertex[edge * 2 + 1] = layer.quantities[edge];
-    }
+    const endpointsLoc = gl.getAttribLocation(this.accum, 'a_endpoints');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload('flow:pos', layer.positions, gl.DYNAMIC_DRAW));
+    gl.enableVertexAttribArray(endpointsLoc);
+    gl.vertexAttribPointer(endpointsLoc, 4, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribDivisor(endpointsLoc, 1);
+
+    // One quantity per edge, and now one instance per edge too, so it maps
+    // straight across with no per-vertex duplication.
     const quantityLoc = gl.getAttribLocation(this.accum, 'a_quantity');
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload('flow:qty', perVertex, gl.DYNAMIC_DRAW));
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload('flow:qty', layer.quantities, gl.DYNAMIC_DRAW));
     gl.enableVertexAttribArray(quantityLoc);
     gl.vertexAttribPointer(quantityLoc, 1, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(quantityLoc, 1);
 
-    gl.drawArrays(gl.LINES, 0, layer.positions.length / 2);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, layer.positions.length / 4);
     this.checkError('desire-line accumulation');
     gl.bindVertexArray(null);
     gl.disable(gl.BLEND);
@@ -456,13 +558,53 @@ export class MapRenderer {
     gl.uniform1i(gl.getUniformLocation(this.resolve, 'u_ramp'), 2);
     gl.uniform1f(gl.getUniformLocation(this.resolve, 'u_maxValue'), max);
 
-    const cornerLoc = gl.getAttribLocation(this.resolve, 'a_corner');
+    const resolveCornerLoc = gl.getAttribLocation(this.resolve, 'a_corner');
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
-    gl.enableVertexAttribArray(cornerLoc);
-    gl.vertexAttribPointer(cornerLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(resolveCornerLoc);
+    gl.vertexAttribPointer(resolveCornerLoc, 2, gl.FLOAT, false, 0, 0);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     this.checkError('desire-line resolve');
     gl.bindVertexArray(null);
+
+    // Joins last, reading the accumulator the resolve pass just read and
+    // never writing to it. The line buffer is already a list of x,y pairs,
+    // so it supplies the endpoint positions with no array of its own.
+    gl.bindVertexArray(this.flowJointVao);
+    gl.useProgram(this.flowJoint);
+    this.setTransform(this.flowJoint, view);
+    const jointRadius = (layer.widthCssPx * pixelRatio) / 2;
+    gl.uniform2f(
+      gl.getUniformLocation(this.flowJoint, 'u_pixelRadius'),
+      (jointRadius * 2) / width,
+      (jointRadius * 2) / height,
+    );
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, target.texture);
+    gl.uniform1i(gl.getUniformLocation(this.flowJoint, 'u_accumulator'), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.cdfTexture);
+    gl.uniform1i(gl.getUniformLocation(this.flowJoint, 'u_cdf'), 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.rampTexture);
+    gl.uniform1i(gl.getUniformLocation(this.flowJoint, 'u_ramp'), 2);
+    gl.uniform1f(gl.getUniformLocation(this.flowJoint, 'u_maxValue'), max);
+
+    const jointCornerLoc = gl.getAttribLocation(this.flowJoint, 'a_corner');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+    gl.enableVertexAttribArray(jointCornerLoc);
+    gl.vertexAttribPointer(jointCornerLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(jointCornerLoc, 0);
+
+    const jointPositionLoc = gl.getAttribLocation(this.flowJoint, 'a_position');
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.upload('flow:pos', layer.positions, gl.DYNAMIC_DRAW));
+    gl.enableVertexAttribArray(jointPositionLoc);
+    gl.vertexAttribPointer(jointPositionLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(jointPositionLoc, 1);
+
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, layer.positions.length / 2);
+    this.checkError('desire-line joins');
+    gl.bindVertexArray(null);
+
     gl.disable(gl.BLEND);
     gl.activeTexture(gl.TEXTURE0);
 
@@ -492,16 +634,19 @@ export class MapRenderer {
     }
 
     if (scene.network) {
-      this.drawFlat('network', scene.network.geometry.positions, scene.network.colors, gl.LINES, scene.view);
+      const { positions, colors, jointColors, widthCssPx } = scene.network;
+      this.drawThick('network', positions, colors, widthCssPx, scene.view, width, height, scene.pixelRatio);
+      this.drawJoints(positions, jointColors, widthCssPx, scene.view, width, height, scene.pixelRatio);
     }
 
     let stats: FlowStats | null = null;
     if (scene.desireLines) {
-      stats = this.drawFlow(scene.desireLines, scene.view, width, height);
+      stats = this.drawFlow(scene.desireLines, scene.view, width, height, scene.pixelRatio);
     }
 
     if (scene.agents) {
-      this.drawAgents(
+      this.drawPoints(
+        'agents',
         scene.agents.positions,
         scene.agents.colors,
         scene.agents.radiusCssPx,
@@ -519,16 +664,21 @@ export class MapRenderer {
     const gl = this.gl;
     this.invalidate();
     gl.deleteBuffer(this.quad);
+    gl.deleteBuffer(this.lineQuad);
     gl.deleteVertexArray(this.flatVao);
     gl.deleteVertexArray(this.pointsVao);
+    gl.deleteVertexArray(this.thickVao);
     gl.deleteVertexArray(this.accumVao);
     gl.deleteVertexArray(this.resolveVao);
+    gl.deleteVertexArray(this.flowJointVao);
     gl.deleteTexture(this.cdfTexture);
     gl.deleteTexture(this.rampTexture);
     this.disposeAccumulator();
     gl.deleteProgram(this.flat);
     gl.deleteProgram(this.points);
+    gl.deleteProgram(this.thick);
     gl.deleteProgram(this.accum);
     gl.deleteProgram(this.resolve);
+    gl.deleteProgram(this.flowJoint);
   }
 }

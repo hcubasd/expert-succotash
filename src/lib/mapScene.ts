@@ -2,11 +2,15 @@ import { RAMP_LENGTH, gradientAt, ramps } from './colors';
 import type { RgbColor } from './colors';
 import { equalize, valueAtPercentile } from './equalize';
 import type { Equalizer } from './equalize';
-import type { Bounds, Geometries, RowBounds } from './geometryMaker';
+import type { Bounds, Geometries, RowBounds, SegmentGeometry } from './geometryMaker';
 import type { MapSelection, Tables } from './mapValues';
 import {
   agentResources, desireLineResources, featureValues, zoneResources,
 } from './mapValues';
+import { consolidateDesireLines, maxDesireSpacing } from './desireLines';
+import { buildNodeGraph, maxHubSpacing, simplifyNetwork } from './networkGraph';
+import type { Aggregation, NodeGraph } from './networkGraph';
+import { spanFromAnchor, thinFromCentroid } from './thinning';
 import type { FlowStats, Scene, View } from '../gl/renderer';
 
 export const LEGEND_TICKS = 9;
@@ -95,25 +99,38 @@ export type ThinnedAgents = {
   radiusCssPx: number;
 };
 
-// One diameter for every agent on screen, fixed in CSS pixels so it never
-// grows or shrinks with zoom -- the same dot at every scale, not a Google
-// Maps-style explode-on-zoom-in. Agents are still walked outward from the
-// centroid, and one that would land within a diameter of something already
-// placed is dropped -- it would only repaint pixels already spoken for. What
-// survives at extreme density is a tight cluster of separate coloured dots,
-// which is the honest picture of "a lot packed into a small area". Zooming in
-// doesn't grow the dots, but it does spread the underlying data apart in
-// screen space, so more of it clears the fixed exclusion and gets drawn --
-// the re-thin on every zoom is still doing real work, it just isn't sizing
-// anything anymore.
-export const AGENT_DIAMETER_CSS_PX = 12;
-
+// Agents thin exactly the way the network does -- same walk, same exclusion,
+// same detail control -- with one difference: an excluded agent is *absorbed*
+// rather than dropped. Its need or capacity is added to whichever drawn
+// circle is nearest, so the total on screen is always the true total no
+// matter how coarse the view. Nothing is discarded, and unlike the network
+// there is no orphan case: every agent either survives or lands in exactly
+// one circle.
+//
+// The exclusion is a diameter, not a radius. It is compared as a centre to
+// centre separation, and two circles of half it each, that far apart, touch
+// without ever overlapping -- so the drawn size can follow the control
+// directly.
+//
+// Floor and ceiling are the same on every layer: exactly zero, and the exact
+// span that leaves the anchor and the one feature farthest from it. Nothing
+// is simpler than the original data at one end or two points at the other,
+// so those are the whole range there is, and the control means the same
+// thing here as it does for the roads and the flows.
+//
+// Only what is *drawn* keeps a floor of its own. A circle of radius zero
+// puts no fragment on screen at all -- unlike a line, whose visibility never
+// depended on the exclusion -- so the drawn radius is clamped to half a
+// device pixel below. That clamp is downstream of every decision about what
+// merges with what: it is a fact about ink, and it is never fed back into
+// the thinning.
 export function thinAgents(
   positions: Float32Array,
   values: Float64Array,
   viewport: Bounds,
   pixelsPerUnit: number,
   pixelRatio: number,
+  detail: number,
 ): ThinnedAgents {
   const candidates: number[] = [];
   for (let i = 0; i < values.length; i++) {
@@ -127,75 +144,148 @@ export function thinAgents(
     return { positions: new Float32Array(0), values: new Float64Array(0), radiusCssPx: 0 };
   }
 
-  let sumX = 0;
-  let sumY = 0;
+  const xOf = (i: number) => positions[i * 2];
+  const yOf = (i: number) => positions[i * 2 + 1];
+
+  const exclusion = exclusionFor(detail, spanFromAnchor(candidates, xOf, yOf));
+
+  const { kept, owner } = thinFromCentroid(candidates, xOf, yOf, exclusion);
+
+  const sums = new Map<number, number>();
   for (const i of candidates) {
-    sumX += positions[i * 2];
-    sumY += positions[i * 2 + 1];
-  }
-  const centroidX = sumX / candidates.length;
-  const centroidY = sumY / candidates.length;
-
-  const distanceToCentroid = (i: number) =>
-    (positions[i * 2] - centroidX) ** 2 + (positions[i * 2 + 1] - centroidY) ** 2;
-
-  const ordered = [...candidates].sort((a, b) => distanceToCentroid(a) - distanceToCentroid(b));
-
-  // The fixed diameter, converted into this zoom's world units so the grid
-  // and exclusion test below can stay in the coordinate space the positions
-  // already use.
-  const deviceDiameter = AGENT_DIAMETER_CSS_PX * pixelRatio;
-  const exclusion = deviceDiameter / pixelsPerUnit;
-
-  // A uniform grid at the exclusion radius: any agent close enough to
-  // conflict is in this cell or one of the eight around it, so the whole
-  // sweep stays linear instead of comparing every pair.
-  const cell = Math.max(exclusion, 1e-12);
-  const grid = new Map<string, number[]>();
-  const keptIndices: number[] = [];
-
-  for (const i of ordered) {
-    const x = positions[i * 2];
-    const y = positions[i * 2 + 1];
-    const cx = Math.floor(x / cell);
-    const cy = Math.floor(y / cell);
-
-    let blocked = false;
-    for (let dx = -1; dx <= 1 && !blocked; dx++) {
-      for (let dy = -1; dy <= 1 && !blocked; dy++) {
-        const bucket = grid.get(`${cx + dx},${cy + dy}`);
-        if (!bucket) continue;
-        for (const j of bucket) {
-          const d2 = (positions[j * 2] - x) ** 2 + (positions[j * 2 + 1] - y) ** 2;
-          if (d2 < exclusion * exclusion) {
-            blocked = true;
-            break;
-          }
-        }
-      }
-    }
-    if (blocked) continue;
-
-    keptIndices.push(i);
-    const key = `${cx},${cy}`;
-    const bucket = grid.get(key);
-    if (bucket) bucket.push(i);
-    else grid.set(key, [i]);
+    const into = owner.get(i)!;
+    sums.set(into, (sums.get(into) ?? 0) + values[i]);
   }
 
-  const keptPositions = new Float32Array(keptIndices.length * 2);
-  const keptValues = new Float64Array(keptIndices.length);
-  keptIndices.forEach((source, target) => {
+  const keptPositions = new Float32Array(kept.length * 2);
+  const keptValues = new Float64Array(kept.length);
+  kept.forEach((source, target) => {
     keptPositions[target * 2] = positions[source * 2];
     keptPositions[target * 2 + 1] = positions[source * 2 + 1];
-    keptValues[target] = values[source];
+    keptValues[target] = sums.get(source) ?? values[source];
   });
+
+  // The drawn circle is the exclusion circle -- what you see is the area
+  // whose agents were summed into it -- floored at one device pixel across
+  // so that a merge radius of zero still leaves something on screen.
+  const deviceDiameter = Math.max(exclusion * pixelsPerUnit, 1);
 
   return {
     positions: keptPositions,
     values: keptValues,
-    radiusCssPx: AGENT_DIAMETER_CSS_PX / 2,
+    radiusCssPx: deviceDiameter / 2 / pixelRatio,
   };
+}
+
+// --- desire lines -----------------------------------------------------------
+
+// Desire lines are drawn at one width like the roads are, and for the same
+// reason: width here is legibility, not data. The value is carried by the
+// accumulated colour, and a wider stroke deposits no more flow than a
+// hairline -- the resolve pass divides by coverage, so thickness spreads a
+// value over more pixels rather than inflating it.
+export const DESIRE_LINE_WIDTH_CSS_PX = 2;
+
+// --- network ----------------------------------------------------------------
+
+// How wide every road is drawn. One number for the whole map: thickness here
+// is legibility, not data -- the value is already in the colour, and varying
+// width by density would make the densest places, which are exactly the ones
+// already hardest to read, the thinnest.
+export const NETWORK_LINE_WIDTH_CSS_PX = 2;
+
+// Detail runs 0 (coarsest -- the exact radius that leaves only the anchor
+// and the single farthest node from it standing, joined by one line) to 1
+// (every link stands alone and draws its own true shape). Cubed so most of
+// the travel sits in the fine half, where the interesting range is: linear
+// spacing would spend most of the slider on skeletons that differ only in
+// how sparse they are. The two ends are not symmetric -- the fine end lands
+// on the original geometry, the coarse end on the two most spatially
+// extreme points in view -- but neither is ever nothing: these are the true
+// geometric limits of the control, not a safety-padded approximation of
+// them.
+export function exclusionFor(detail: number, ceiling: number, floor = 0): number {
+  const clamped = Math.max(0, Math.min(1, detail));
+  // Spans floor..ceiling rather than 0..ceiling: the network's floor is an
+  // exact zero, but agents draw a real circle and cannot go below one device
+  // pixel of it. Passing no floor gives back the network's behaviour exactly.
+  const span = Math.max(0, ceiling - floor);
+  return floor + span * (1 - clamped) ** 3;
+}
+
+export const DEFAULT_DETAIL = 0.45;
+
+// The colour for each line endpoint, blended where several lines meet.
+//
+// Blending happens along the ramp, not in RGB. Every colour the app draws is
+// a vertex of one 256-hue wheel at a single luminance, and averaging two of
+// them channel by channel lands between the vertices -- a colour that is off
+// the wheel and below that luminance, which is exactly the washed-out result
+// the single-luminance design exists to avoid. Averaging the *positions*
+// along the ramp and looking up once keeps the answer on the wheel by
+// construction.
+//
+// A ramp is also half the wheel laid out as a flat 128-entry array rather
+// than a closed circle, so a midpoint between two positions is unambiguous:
+// none of the wraparound that makes averaging hues on a full circle
+// ill-defined applies here.
+// endpointNode says which endpoints can be shared at all: only graph nodes
+// can have more than one line meeting on them, and a vertex interior to a
+// link is by definition its own. So the blend is a map over a few hundred
+// thousand integer ids rather than a coordinate lookup over every one of the
+// millions of endpoints a fully detailed view emits.
+export function jointColors(
+  ts: Float64Array,
+  endpointNode: Int32Array,
+  ramp: RgbColor[],
+): Uint8Array {
+  const endpoints = endpointNode.length;
+
+  const blended = new Map<number, { sum: number; count: number }>();
+  for (let endpoint = 0; endpoint < endpoints; endpoint++) {
+    const node = endpointNode[endpoint];
+    if (node < 0) continue;
+    // Two endpoints per line, so the line's own position is endpoint >> 1.
+    const t = ts[endpoint >> 1];
+    if (!Number.isFinite(t)) continue;
+    const entry = blended.get(node);
+    if (entry) {
+      entry.sum += t;
+      entry.count++;
+    } else {
+      blended.set(node, { sum: t, count: 1 });
+    }
+  }
+
+  const colors = new Uint8Array(endpoints * 3);
+  for (let endpoint = 0; endpoint < endpoints; endpoint++) {
+    const node = endpointNode[endpoint];
+    // A bend inside one link takes that link's own colour: blending it with
+    // itself is what the shared-node case would produce anyway.
+    const own = ts[endpoint >> 1];
+    const entry = node >= 0 ? blended.get(node) : undefined;
+    const t = entry ? entry.sum / entry.count : own;
+    // Non-finite means nothing meeting here had a value, which the lines
+    // themselves render white.
+    const color = Number.isFinite(t) ? gradientAt(t, ramp) : WHITE;
+    colors[endpoint * 3] = color.r;
+    colors[endpoint * 3 + 1] = color.g;
+    colors[endpoint * 3 + 2] = color.b;
+  }
+  return colors;
+}
+
+// The graph is a property of the file, not of the view, so it survives every
+// zoom. Keyed weakly off the geometry so a reloaded file drops the old one.
+const graphCache = new WeakMap<SegmentGeometry, NodeGraph>();
+
+function networkGraph(network: SegmentGeometry): NodeGraph {
+  let graph = graphCache.get(network);
+  if (!graph) {
+    graph = buildNodeGraph(network);
+    graphCache.set(network, graph);
+  }
+  return graph;
 }
 
 // --- the scene --------------------------------------------------------------
@@ -215,6 +305,7 @@ export function buildScene(
   view: View,
   pixelsPerUnit: number,
   pixelRatio: number,
+  detail: number,
 ): BuiltScene {
   const viewport = viewportOf(view);
   const hollowZones = geometries.zones ? { geometry: geometries.zones, fillColors: null } : null;
@@ -259,25 +350,49 @@ export function buildScene(
     const ramp = ramps(1)[0];
     if (!network || !values) return empty;
 
-    const equalizer = visibleEqualizer(values, network.rowBounds, network.rowCount, viewport);
-    const segments = network.positions.length / 4;
-    // Two vertices per segment, both the same colour, since gl.LINES
-    // advances attributes per vertex.
-    const colors = new Uint8Array(segments * 2 * 3);
-    for (let segment = 0; segment < segments; segment++) {
-      const color = colorOf(values[network.rowIndex[segment]], equalizer, ramp);
-      for (let corner = 0; corner < 2; corner++) {
-        const at = (segment * 2 + corner) * 3;
-        colors[at] = color.r;
-        colors[at + 1] = color.g;
-        colors[at + 2] = color.b;
-      }
+    // Grade is a property of a stretch of road, so several links collapsing
+    // into one virtual edge average (by length); counts and grams are
+    // quantities carried over it, so they add.
+    const aggregation: Aggregation = selection.source === 'grade' ? 'mean' : 'sum';
+    const graph = networkGraph(network);
+
+    // One path at every level of detail. The radius alone decides how much
+    // is shown, and at zero it decides nothing: every link stands alone
+    // between two hubs and draws its own shape, which is the original
+    // network back. The ceiling is measured fresh each time -- it depends on
+    // exactly which nodes this view can see, not on screen size, so it moves
+    // with the viewport rather than the canvas.
+    const exclusion = exclusionFor(detail, maxHubSpacing(graph, viewport));
+    const { positions, values: lineValues, endpointNode } =
+      simplifyNetwork(graph, values, viewport, exclusion, aggregation);
+
+    const finite: number[] = [];
+    for (const value of lineValues) if (Number.isFinite(value)) finite.push(value);
+    const equalizer = equalize(finite);
+
+    const lineCount = positions.length / 4;
+    // Each line's position along the ramp, kept rather than only its colour,
+    // because the joins blend these rather than the colours they resolve to.
+    const ts = new Float64Array(lineCount);
+    const colors = new Uint8Array(lineCount * 3);
+    for (let line = 0; line < lineCount; line++) {
+      const value = lineValues[line];
+      ts[line] = Number.isFinite(value) ? equalizer.at(value) : NaN;
+      const color = colorOf(value, equalizer, ramp);
+      colors[line * 3] = color.r;
+      colors[line * 3 + 1] = color.g;
+      colors[line * 3 + 2] = color.b;
     }
 
     return {
       scene: {
         view, pixelRatio, zones: hollowZones, agents: null, desireLines: null,
-        network: { geometry: network, colors },
+        network: {
+          positions,
+          colors,
+          jointColors: jointColors(ts, endpointNode, ramp),
+          widthCssPx: NETWORK_LINE_WIDTH_CSS_PX,
+        },
       },
       legend: legendFrom(equalizer, ramp),
       pendingFlowRamp: null,
@@ -290,7 +405,7 @@ export function buildScene(
     const ramp = rampFor(agentResources(tables, selection.kind), selection.resource);
     if (!agents || !values || !ramp) return empty;
 
-    const thinned = thinAgents(agents.positions, values, viewport, pixelsPerUnit, pixelRatio);
+    const thinned = thinAgents(agents.positions, values, viewport, pixelsPerUnit, pixelRatio, detail);
     const equalizer = equalize(Array.from(thinned.values));
     const colors = new Uint8Array(thinned.values.length * 3);
     for (let i = 0; i < thinned.values.length; i++) {
@@ -314,10 +429,21 @@ export function buildScene(
   const ramp = rampFor(desireLineResources(tables), selection.resource);
   if (!edges || !ramp) return empty;
 
+  // Consolidation only changes how many lines reach the accumulator, never
+  // what it does with them: the same additive pass, the same equalized
+  // resolve. At full detail nothing merges and this is exactly the raw set.
+  const exclusion = exclusionFor(detail, maxDesireSpacing(edges.positions, viewport));
+  const flow = consolidateDesireLines(edges.positions, edges.quantities, viewport, exclusion);
+
   return {
     scene: {
       view, pixelRatio, zones: hollowZones, network: null, agents: null,
-      desireLines: { positions: edges.positions, quantities: edges.quantities, ramp },
+      desireLines: {
+        positions: flow.positions,
+        quantities: flow.quantities,
+        ramp,
+        widthCssPx: DESIRE_LINE_WIDTH_CSS_PX,
+      },
     },
     legend: null,
     pendingFlowRamp: ramp,

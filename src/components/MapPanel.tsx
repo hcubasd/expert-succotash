@@ -10,6 +10,8 @@ type Props = {
   draft: Draft;
   onDraft: (draft: Draft) => void;
   legend: Legend | null;
+  detail: number;
+  onDetail: (detail: number) => void;
   onDiagram: () => void;
 };
 
@@ -97,7 +99,9 @@ function LegendBar({ legend }: { legend: Legend }) {
   );
 }
 
-export default function MapPanel({ tables, draft, onDraft, legend, onDiagram }: Props) {
+export default function MapPanel({
+  tables, draft, onDraft, legend, detail, onDetail, onDiagram,
+}: Props) {
   const complete = toSelection(draft) !== null;
 
   const resources =
@@ -262,6 +266,28 @@ export default function MapPanel({ tables, draft, onDraft, legend, onDiagram }: 
           </div>
           <LegendBar legend={legend} />
         </div>
+      )}
+
+      {/* One control shared by every layer that thins: how far things are
+          collapsed before they're drawn. At the far right nothing is
+          collapsed -- roads keep their own shape, agents are one device
+          pixel each, desire lines are agent to agent. At the far left only
+          the two most distant features survive. */}
+      {draft.mode !== null && draft.mode !== 'zones' && (
+        <Row title="detail">
+          <input
+            type="range"
+            min={0}
+            max={1}
+            // No quantization: a native slider is already bounded to one
+            // distinct position per pixel of its own track, so a numeric
+            // step could only ever make that coarser, never finer.
+            step="any"
+            value={detail}
+            onChange={event => onDetail(Number(event.target.value))}
+            style={{ width: '100%', accentColor: rgbStr(chosen) }}
+          />
+        </Row>
       )}
 
       <button className="overlay-btn" style={{ position: 'static', marginTop: 'auto' }} onClick={onDiagram}>

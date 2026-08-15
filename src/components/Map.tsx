@@ -1,9 +1,9 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { MapRenderer } from '../gl/renderer';
 import type { View } from '../gl/renderer';
 import { boundsForMode } from '../lib/geometryMaker';
 import type { Bounds, Geometries } from '../lib/geometryMaker';
-import { buildScene, legendFromFlow } from '../lib/mapScene';
+import { DEFAULT_DETAIL, buildScene, legendFromFlow } from '../lib/mapScene';
 import type { Legend } from '../lib/mapScene';
 import { toSelection } from '../lib/mapValues';
 import type { Draft, Tables } from '../lib/mapValues';
@@ -20,6 +20,13 @@ type Props = {
 const FIT_PADDING = 0.92;
 // Below this a drag reads as a click, not a zoom rectangle.
 const MIN_DRAG_PX = 4;
+
+// The slider's raw onChange fires on every intermediate value while
+// dragging -- unlike pan/zoom, which only ever commits on release. Left at
+// 0 for now so that behaviour is visible and feelable rather than guessed
+// at; the wiring below is real debounce, not a stand-in, so turning it on
+// later is a one-line change to this constant.
+const DETAIL_DEBOUNCE_MS = 0;
 
 type Drag = { x0: number; y0: number; x1: number; y1: number };
 
@@ -58,6 +65,21 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
   const [viewVersion, setViewVersion] = useState(0);
   const [flowLegend, setFlowLegend] = useState<Legend | null>(null);
   const [staticLegend, setStaticLegend] = useState<Legend | null>(null);
+  // detail is what the slider shows and moves instantly; committedDetail is
+  // what actually drives a recompute, released after DETAIL_DEBOUNCE_MS of
+  // no further movement. Splitting them is what makes the debounce meaning-
+  // ful rather than cosmetic -- the thumb never waits on the network graph.
+  const [detail, setDetail] = useState(DEFAULT_DETAIL);
+  const [committedDetail, setCommittedDetail] = useState(DEFAULT_DETAIL);
+
+  useEffect(() => {
+    if (DETAIL_DEBOUNCE_MS <= 0) {
+      setCommittedDetail(detail);
+      return;
+    }
+    const timer = setTimeout(() => setCommittedDetail(detail), DETAIL_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [detail]);
 
   const selection = useMemo(() => toSelection(draft), [draft]);
   // The fit follows the mode, so changing mode reframes onto that layer.
@@ -121,6 +143,7 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
       view,
       pixelsPerUnit(view, size.width),
       size.ratio,
+      committedDetail,
     );
     const stats = renderer.render(built.scene);
 
@@ -128,7 +151,7 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
     // Desire lines can only be measured by drawing them, so their legend
     // arrives with the render's return value rather than ahead of it.
     setFlowLegend(built.pendingFlowRamp && stats ? legendFromFlow(stats, built.pendingFlowRamp) : null);
-  }, [tables, geometries, selection, size, viewVersion]);
+  }, [tables, geometries, selection, size, viewVersion, committedDetail]);
 
   function toWorld(clientX: number, clientY: number) {
     const canvas = canvasRef.current!;
@@ -245,6 +268,8 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
           draft={draft}
           onDraft={onDraft}
           legend={flowLegend ?? staticLegend}
+          detail={detail}
+          onDetail={setDetail}
           onDiagram={onDiagram}
         />
       </div>

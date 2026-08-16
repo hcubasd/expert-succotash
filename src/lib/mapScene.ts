@@ -8,6 +8,9 @@ import {
   agentResources, desireLineResources, featureValues, zoneResources,
 } from './mapValues';
 import { consolidateDesireLines, maxDesireSpacing } from './desireLines';
+import { collapseZones, maxZoneSpacing } from './zoneShapes';
+import type { CollapsedZones } from './zoneShapes';
+import type { PolygonGeometry } from './geometryMaker';
 import { buildNodeGraph, maxHubSpacing, simplifyNetwork } from './networkGraph';
 import type { Aggregation, NodeGraph } from './networkGraph';
 import { spanFromAnchor, thinFromCentroid } from './thinning';
@@ -149,12 +152,12 @@ export function thinAgents(
 
   const exclusion = exclusionFor(detail, spanFromAnchor(candidates, xOf, yOf));
 
-  const { kept, owner } = thinFromCentroid(candidates, xOf, yOf, exclusion);
+  const { kept, owners } = thinFromCentroid(candidates, xOf, yOf, exclusion);
 
   const sums = new Map<number, number>();
-  for (const i of candidates) {
-    const into = owner.get(i)!;
-    sums.set(into, (sums.get(into) ?? 0) + values[i]);
+  for (let k = 0; k < candidates.length; k++) {
+    const into = owners[k];
+    sums.set(into, (sums.get(into) ?? 0) + values[candidates[k]]);
   }
 
   const keptPositions = new Float32Array(kept.length * 2);
@@ -175,6 +178,35 @@ export function thinAgents(
     values: keptValues,
     radiusCssPx: deviceDiameter / 2 / pixelRatio,
   };
+}
+
+// --- zones ------------------------------------------------------------------
+
+// Zone outlines are drawn at the same width the roads and flows are.
+export const ZONE_BORDER_WIDTH_CSS_PX = 2;
+
+// Zones appear in every mode -- coloured in their own, hollow as the basemap
+// under the others -- but the collapse only depends on the view and the
+// control, never on which mode is asking. One slot is enough: a frame asks
+// with the same arguments every time.
+let zoneCache: {
+  geometry: PolygonGeometry;
+  exclusion: number;
+  viewport: Bounds;
+  collapsed: CollapsedZones;
+} | null = null;
+
+function collapsedZones(geometry: PolygonGeometry, viewport: Bounds, detail: number): CollapsedZones {
+  const exclusion = exclusionFor(detail, maxZoneSpacing(geometry, viewport));
+  const hit = zoneCache;
+  if (hit && hit.geometry === geometry && hit.exclusion === exclusion
+    && hit.viewport.minX === viewport.minX && hit.viewport.maxX === viewport.maxX
+    && hit.viewport.minY === viewport.minY && hit.viewport.maxY === viewport.maxY) {
+    return hit.collapsed;
+  }
+  const collapsed = collapseZones(geometry, viewport, exclusion);
+  zoneCache = { geometry, exclusion, viewport, collapsed };
+  return collapsed;
 }
 
 // --- desire lines -----------------------------------------------------------
@@ -308,7 +340,13 @@ export function buildScene(
   detail: number,
 ): BuiltScene {
   const viewport = viewportOf(view);
-  const hollowZones = geometries.zones ? { geometry: geometries.zones, fillColors: null } : null;
+  const basemap = geometries.zones ? collapsedZones(geometries.zones, viewport, detail) : null;
+  const hollowZones = basemap ? {
+    fillPositions: basemap.fillPositions,
+    fillColors: null,
+    borderPositions: basemap.borderPositions,
+    borderWidthCssPx: ZONE_BORDER_WIDTH_CSS_PX,
+  } : null;
 
   const empty: BuiltScene = {
     scene: { view, pixelRatio, zones: hollowZones, network: null, agents: null, desireLines: null },
@@ -323,10 +361,12 @@ export function buildScene(
     const ramp = rampFor(zoneResources(tables, selection.source), selection.resource);
     if (!zones || !values || !ramp) return empty;
 
+    const collapsed = collapsedZones(zones, viewport, detail);
     const equalizer = visibleEqualizer(values, zones.rowBounds, zones.rowCount, viewport);
-    const fillColors = new Uint8Array((zones.fillPositions.length / 2) * 3);
-    for (let vertex = 0; vertex < zones.fillPositions.length / 2; vertex++) {
-      const color = colorOf(values[zones.fillRowIndex[vertex]], equalizer, ramp);
+    const vertices = collapsed.fillPositions.length / 2;
+    const fillColors = new Uint8Array(vertices * 3);
+    for (let vertex = 0; vertex < vertices; vertex++) {
+      const color = colorOf(values[collapsed.fillRow[vertex]], equalizer, ramp);
       fillColors[vertex * 3] = color.r;
       fillColors[vertex * 3 + 1] = color.g;
       fillColors[vertex * 3 + 2] = color.b;
@@ -335,7 +375,12 @@ export function buildScene(
     return {
       scene: {
         view, pixelRatio, network: null, agents: null, desireLines: null,
-        zones: { geometry: zones, fillColors },
+        zones: {
+          fillPositions: collapsed.fillPositions,
+          fillColors,
+          borderPositions: collapsed.borderPositions,
+          borderWidthCssPx: ZONE_BORDER_WIDTH_CSS_PX,
+        },
       },
       legend: legendFrom(equalizer, ramp),
       pendingFlowRamp: null,

@@ -1,6 +1,5 @@
 import type { RgbColor } from '../lib/colors';
 import { binnedCdf } from '../lib/equalize';
-import type { PolygonGeometry } from '../lib/geometryMaker';
 import {
   ACCUM_FRAG, ACCUM_VERT,
   FLAT_FRAG, FLAT_VERT,
@@ -18,9 +17,17 @@ export type View = { centerX: number; centerY: number; scaleX: number; scaleY: n
 export type Scene = {
   view: View;
   pixelRatio: number;
-  // fillColors null means hollow: only the (always black, always 1px)
-  // borders are drawn, and the white background shows through.
-  zones: { geometry: PolygonGeometry; fillColors: Uint8Array | null } | null;
+  // Rebuilt per frame rather than taken straight off the geometry: zone
+  // vertices move as the detail control collapses them, so the triangulation
+  // that ships with the file is only valid at full detail.
+  // fillColors null means hollow -- only the borders draw, and the white
+  // background shows through.
+  zones: {
+    fillPositions: Float32Array;
+    fillColors: Uint8Array | null;
+    borderPositions: Float32Array;
+    borderWidthCssPx: number;
+  } | null;
   // Either the simplified virtual graph or the real links, whichever the
   // view calls for -- both arrive as the same x1,y1,x2,y2 lines with one
   // colour each, so the renderer doesn't need to know which it got.
@@ -129,6 +136,10 @@ export class MapRenderer {
     height: number;
   } | null = null;
   private buffers = new Map<string, Cached>();
+  // Zeroed instance colours, grown as needed and handed out as exact-length
+  // views. Black is the only colour zone outlines take, so there is nothing
+  // per-feature to store.
+  private black: Uint8Array = new Uint8Array(0);
   private floatTargetsSupported: boolean;
   private readback: Uint16Array | Float32Array | null = null;
 
@@ -207,6 +218,11 @@ export class MapRenderer {
       entry.source = data;
     }
     return entry.buffer;
+  }
+
+  private blackFor(length: number): Uint8Array {
+    if (this.black.length < length) this.black = new Uint8Array(length);
+    return this.black.length === length ? this.black : this.black.subarray(0, length);
   }
 
   invalidate() {
@@ -624,13 +640,21 @@ export class MapRenderer {
     gl.disable(gl.BLEND);
 
     if (scene.zones) {
-      const { geometry, fillColors } = scene.zones;
+      const { fillPositions, fillColors, borderPositions, borderWidthCssPx } = scene.zones;
       if (fillColors) {
-        this.drawFlat('zoneFill', geometry.fillPositions, fillColors, gl.TRIANGLES, scene.view);
+        this.drawFlat('zoneFill', fillPositions, fillColors, gl.TRIANGLES, scene.view);
       }
-      // borderColors is left zeroed, which is black -- the one colour zone
-      // outlines ever take.
-      this.drawFlat('zoneBorder', geometry.borderPositions, geometry.borderColors, gl.LINES, scene.view);
+      // Black throughout -- the one colour a zone outline ever takes -- so the
+      // colour buffers are simply zeroed and grown as needed.
+      const black = this.blackFor((borderPositions.length / 4) * 3);
+      this.drawThick(
+        'zoneBorder', borderPositions, black, borderWidthCssPx,
+        scene.view, width, height, scene.pixelRatio,
+      );
+      this.drawJoints(
+        borderPositions, this.blackFor((borderPositions.length / 2) * 3), borderWidthCssPx,
+        scene.view, width, height, scene.pixelRatio,
+      );
     }
 
     if (scene.network) {

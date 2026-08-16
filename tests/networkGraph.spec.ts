@@ -270,31 +270,31 @@ describe('thinFromCentroid', () => {
   });
 
   it('has nothing to do with an empty set', () => {
-    const { kept, owner } = thinFromCentroid([], () => 0, () => 0, 1);
+    const { kept, owners } = thinFromCentroid([], () => 0, () => 0, 1);
     expect(kept).toEqual([]);
-    expect(owner.size).toBe(0);
+    expect(owners.length).toBe(0);
   });
 
   it('accounts for every candidate exactly once, kept or absorbed', () => {
     // What lets agents sum rather than drop: nothing falls through.
-    const { owner } = thin(2);
-    expect(owner.size).toBe(all.length);
-    for (const i of all) expect(owner.has(i)).toBe(true);
+    const { owners } = thin(2);
+    expect(owners.length).toBe(all.length);
+    for (const owner of owners) expect(all).toContain(owner);
   });
 
   it('says a kept point owns itself', () => {
-    const { kept, owner } = thin(2);
-    for (const i of kept) expect(owner.get(i)).toBe(i);
+    const { kept, owners } = thin(2);
+    for (const i of kept) expect(owners[all.indexOf(i)]).toBe(i);
   });
 
   it('absorbs a point into the nearest kept point, not whichever was found first', () => {
-    // Point 2 sits between kept points on both sides; it must go to the one
-    // actually nearest it, since that is the circle drawn over it.
+    // Point 0 sits within reach of the anchor; it must go to the one actually
+    // nearest it, since that is the circle drawn over it.
     const line = [0, 1, 2];
     const px = [0, 2.6, 10];
-    const { kept, owner } = thinFromCentroid(line, i => px[i], () => 0, 3);
+    const { kept, owners } = thinFromCentroid(line, i => px[i], () => 0, 3);
     // the anchor is 1 (nearest the centroid at 4.2); 0 is 2.6 away, so absorbed
     expect(kept).toContain(1);
-    expect(owner.get(0)).toBe(1);
+    expect(owners[0]).toBe(1);
   });
 });

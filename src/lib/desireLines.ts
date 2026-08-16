@@ -146,14 +146,20 @@ export function consolidateDesireLines(
     return { positions: new Float32Array(0), quantities: new Float32Array(0) };
   }
 
-  const { owner } = thinFromCentroid(candidates, i => pool.x[i], i => pool.y[i], exclusion);
+  const { owners } = thinFromCentroid(candidates, i => pool.x[i], i => pool.y[i], exclusion);
+
+  // owners is aligned to the candidate list; edges reference pooled endpoint
+  // ids, so this indexes it the other way round once rather than searching
+  // per edge. -1 marks an endpoint that was never a candidate.
+  const ownerOf = new Int32Array(pool.count).fill(-1);
+  for (let k = 0; k < candidates.length; k++) ownerOf[candidates[k]] = owners[k];
 
   const totals = new Map<number, { sum: number; a: number; b: number }>();
   for (let e = 0; e < pool.edgeCount; e++) {
     if (!visibleEdge[e]) continue;
-    const ownerA = owner.get(pool.edgeA[e]);
-    const ownerB = owner.get(pool.edgeB[e]);
-    if (ownerA === undefined || ownerB === undefined || ownerA === ownerB) continue;
+    const ownerA = ownerOf[pool.edgeA[e]];
+    const ownerB = ownerOf[pool.edgeB[e]];
+    if (ownerA < 0 || ownerB < 0 || ownerA === ownerB) continue;
 
     const quantity = quantities[e];
     if (!Number.isFinite(quantity)) continue;

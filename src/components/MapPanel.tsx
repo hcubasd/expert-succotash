@@ -273,7 +273,7 @@ export default function MapPanel({
           collapsed -- roads keep their own shape, agents are one device
           pixel each, desire lines are agent to agent. At the far left only
           the two most distant features survive. */}
-      {draft.mode !== null && draft.mode !== 'zones' && (
+      {draft.mode !== null && (
         <Row title="detail">
           <input
             type="range"

@@ -72,6 +72,24 @@ export function originOf(bounds: Bounds): Origin {
 // over what's visible, so this is read on every zoom.
 export type RowBounds = Float32Array;
 
+// The rings a polygon layer is built from, kept alongside the triangulated
+// form so the shapes can be rebuilt after their points move. Triangulation is
+// only valid for the vertices it was computed from, so anything that relocates
+// vertices has to start again from the rings.
+export type PolygonRings = {
+  // Every ring's vertices, x,y interleaved, origin already subtracted.
+  points: Float32Array;
+  // Ring r owns vertices ringStart[r] .. ringStart[r + 1]; one extra entry
+  // closes the last ring.
+  ringStart: Uint32Array;
+  // Part p owns rings partStart[p] .. partStart[p + 1]. A part is one shell
+  // plus its holes, which have to be triangulated together.
+  partStart: Uint32Array;
+  partRow: Uint32Array;
+  ringCount: number;
+  partCount: number;
+};
+
 export type PolygonGeometry = {
   rowCount: number;
   // Triangulated interiors, every polygon in one buffer: x,y interleaved.
@@ -85,6 +103,7 @@ export type PolygonGeometry = {
   borderRowIndex: Uint32Array;
   borderColors: Uint8Array;
   rowBounds: RowBounds;
+  rings: PolygonRings;
 };
 
 export type SegmentGeometry = {
@@ -168,9 +187,21 @@ export function makePolygons(geometries: RawGeometry[], origin: Origin): Polygon
   const border: number[] = [];
   const borderRow: number[] = [];
 
+  const ringPoints: number[] = [];
+  const ringStart: number[] = [];
+  const partStart: number[] = [];
+  const partRow: number[] = [];
+
   geometries.forEach((geometry, row) => {
     for (const rings of polygonParts(geometry)) {
       if (rings.length === 0) continue;
+
+      partStart.push(ringStart.length);
+      partRow.push(row);
+      for (const ring of rings) {
+        ringStart.push(ringPoints.length / 2);
+        for (const [x, y] of ring) ringPoints.push(x - origin.x, y - origin.y);
+      }
 
       // earcut wants one flat coordinate array plus the start index of each
       // hole; rings past the first are holes.
@@ -197,9 +228,20 @@ export function makePolygons(geometries: RawGeometry[], origin: Origin): Polygon
     }
   });
 
+  ringStart.push(ringPoints.length / 2);
+  partStart.push(ringStart.length - 1);
+
   const fillPositions = new Float32Array(fill);
   const fillRowIndex = new Uint32Array(fillRow);
   return {
+    rings: {
+      points: new Float32Array(ringPoints),
+      ringStart: new Uint32Array(ringStart),
+      partStart: new Uint32Array(partStart),
+      partRow: new Uint32Array(partRow),
+      ringCount: ringStart.length - 1,
+      partCount: partRow.length,
+    },
     rowCount: geometries.length,
     fillPositions,
     fillRowIndex,

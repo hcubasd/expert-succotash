@@ -22,11 +22,15 @@ const FIT_PADDING = 0.92;
 const MIN_DRAG_PX = 4;
 
 // The slider's raw onChange fires on every intermediate value while
-// dragging -- unlike pan/zoom, which only ever commits on release. Left at
-// 0 for now so that behaviour is visible and feelable rather than guessed
-// at; the wiring below is real debounce, not a stand-in, so turning it on
-// later is a one-line change to this constant.
-const DETAIL_DEBOUNCE_MS = 0;
+// dragging -- unlike pan/zoom, which only ever commits on release. Off for
+// every mode, zones included: it was tried as a global constant, delayed
+// modes that never needed it, and even scoped to zones alone it's not what
+// was asked for here. The split between `detail` and `committedDetail` below
+// stays regardless, so turning this into a real per-mode debounce later is
+// still a one-line change, not a rewire.
+function detailDebounceFor(): number {
+  return 0;
+}
 
 type Drag = { x0: number; y0: number; x1: number; y1: number };
 
@@ -66,18 +70,18 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
   const [flowLegend, setFlowLegend] = useState<Legend | null>(null);
   const [staticLegend, setStaticLegend] = useState<Legend | null>(null);
   // detail is what the slider shows and moves instantly; committedDetail is
-  // what actually drives a recompute, released after DETAIL_DEBOUNCE_MS of
-  // no further movement. Splitting them is what makes the debounce meaning-
-  // ful rather than cosmetic -- the thumb never waits on the network graph.
+  // what actually drives a recompute. Kept as two states even at zero delay,
+  // so a real debounce is a constant to change, not new wiring to add.
   const [detail, setDetail] = useState(DEFAULT_DETAIL);
   const [committedDetail, setCommittedDetail] = useState(DEFAULT_DETAIL);
 
   useEffect(() => {
-    if (DETAIL_DEBOUNCE_MS <= 0) {
+    const delay = detailDebounceFor();
+    if (delay <= 0) {
       setCommittedDetail(detail);
       return;
     }
-    const timer = setTimeout(() => setCommittedDetail(detail), DETAIL_DEBOUNCE_MS);
+    const timer = setTimeout(() => setCommittedDetail(detail), delay);
     return () => clearTimeout(timer);
   }, [detail]);
 

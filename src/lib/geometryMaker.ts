@@ -424,25 +424,3 @@ export function boundsOf(geometries: Geometries): Bounds | null {
   ]);
 }
 
-// The extent of just the layer a mode draws, rather than of everything
-// loaded. A network reaching well past the zones would otherwise leave the
-// zones a speck in a corner while zones mode is showing -- the fitted view
-// should frame what's actually on screen.
-//
-// Measured over the whole mode, not the selected resource, so switching
-// resource doesn't jump the view out from under the reader. With no mode
-// chosen there's nothing but the hollow basemap, so zones is the answer.
-export function boundsForMode(
-  geometries: Geometries,
-  mode: 'zones' | 'desire_lines' | 'agents' | 'network' | null,
-): Bounds | null {
-  const own =
-    mode === 'network' && geometries.network ? [geometries.network.positions]
-    : mode === 'agents' && geometries.agents ? [geometries.agents.positions]
-    : mode === 'desire_lines' && geometries.desireLines
-      ? [...geometries.desireLines.values()].map(e => e.positions)
-    : mode === 'zones' ? zoneArrays(geometries)
-    : [];
-
-  return boundsOfArrays(own.length ? own : zoneArrays(geometries)) ?? boundsOf(geometries);
-}

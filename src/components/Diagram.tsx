@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { squeezeFg } from 'psychic-potato';
 import { LUMINANCE, SESSION_ROTATION, grayAt, ngon, rgbStr } from '../lib/colors';
+import { LINE_WIDTH_CSS_PX } from '../lib/mapScene';
 import { EDGES, NODES, POSITIONS, labelOf } from './diagramLayout';
 import type { TableName } from '../lib/schema';
 
@@ -132,7 +133,7 @@ export default function Diagram({ loaded, onOpenTable, onPickFile, onBack, onCle
           ))}
         </defs>
         {edges.map((edge, i) => (
-          <path key={i} d={edge.d} fill="none" stroke={`url(#edge-${i})`} strokeWidth={1} />
+          <path key={i} d={edge.d} fill="none" stroke={`url(#edge-${i})`} strokeWidth={LINE_WIDTH_CSS_PX} />
         ))}
       </svg>
 
@@ -188,12 +189,12 @@ export default function Diagram({ loaded, onOpenTable, onPickFile, onBack, onCle
 
       <Spacer weight={GAP_WEIGHT} />
 
-      <button className="overlay-btn" style={{ bottom: 12, left: 12 }} onClick={onBack}>
-        ← map
+      <button className="word-btn" style={{ bottom: '1em', left: '1em' }} onClick={onBack}>
+        Map
       </button>
       {loaded.size > 0 && (
-        <button className="overlay-btn" style={{ bottom: 12, right: 12 }} onClick={handleClearAll}>
-          clear all
+        <button className="word-btn" style={{ bottom: '1em', right: '1em' }} onClick={handleClearAll}>
+          Clear
         </button>
       )}
     </div>

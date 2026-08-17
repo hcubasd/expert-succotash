@@ -9,10 +9,10 @@ import {
   originOf, rawBounds,
 } from './lib/geometryMaker';
 import type { Geometries, Origin } from './lib/geometryMaker';
-import { stratumValues, valueNumbers } from './lib/mapValues';
+import { DEFAULT_ACTIVE, stratumValues, valueNumbers } from './lib/mapValues';
 import type { Draft } from './lib/mapValues';
 import type { RawGeometry, RawTable } from './lib/rawTable';
-import { FILENAME } from './lib/schema';
+import { FILENAME, REQUIRED_COLUMNS } from './lib/schema';
 import type { TableName } from './lib/schema';
 import { makeTable } from './lib/tableMaker';
 import type { Table as TableData } from './lib/tableMaker';
@@ -33,7 +33,7 @@ export default function App() {
   const [tables, setTables] = useState<Partial<Record<TableName, TableData>>>({});
   const [activeColumn, setActiveColumn] = useState<ActiveColumn | null>(null);
   const [geometries, setGeometries] = useState<Geometries>(emptyGeometries);
-  const [draft, setDraft] = useState<Draft>({ mode: null });
+  const [draft, setDraft] = useState<Draft>({ active: DEFAULT_ACTIVE });
 
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingTable = useRef<TableName | null>(null);
@@ -46,6 +46,16 @@ export default function App() {
 
   const ingest = useCallback(
     async (target: TableName, file: File) => {
+      // Cheap and first: the picker never enforces which file goes with
+      // which card, so nothing stops the wrong one being chosen by mistake.
+      // Extra columns in a real match are always fine and silently ignored
+      // elsewhere -- this only ever catches the file being some other table
+      // entirely, or missing something that table can't do without.
+      if (file.name !== FILENAME[target]) {
+        window.alert(`Expected ${FILENAME[target]} for this card, but got ${file.name}.`);
+        return;
+      }
+
       let raw: RawTable;
       let rawGeometries: RawGeometry[] | null = null;
 
@@ -55,6 +65,12 @@ export default function App() {
         rawGeometries = parsed.geometries;
       } else {
         raw = loadCsv(await file.text());
+      }
+
+      const missing = REQUIRED_COLUMNS[target].filter(column => !raw.headers.includes(column));
+      if (missing.length > 0) {
+        window.alert(`${file.name} is missing required column(s): ${missing.join(', ')}.`);
+        return;
       }
 
       const table = makeTable(target, raw);
@@ -114,13 +130,30 @@ export default function App() {
     setTables({});
     setGeometries(emptyGeometries());
     setActiveColumn(null);
-    setDraft({ mode: null });
+    setDraft({ active: DEFAULT_ACTIVE });
   }
 
   function selectColumn(table: TableName, column: string) {
     setActiveColumn(current =>
       current && current.table === table && current.column === column ? null : { table, column },
     );
+  }
+
+  // Removes one file, not everything -- the table-view Clear button. Only
+  // four tables carry geometry at all, so only those four have a matching
+  // field to null out; the rest just drop out of `tables`.
+  function clearTable(target: TableName) {
+    setTables(current => {
+      const next = { ...current };
+      delete next[target];
+      return next;
+    });
+    if (target === 'zones' || target === 'agents' || target === 'network' || target === 'desire_lines') {
+      const key = target === 'desire_lines' ? 'desireLines' : target;
+      setGeometries(current => ({ ...current, [key]: null }));
+    }
+    setActiveColumn(current => (current?.table === target ? null : current));
+    setView({ kind: 'diagram' });
   }
 
   const picker = (
@@ -176,7 +209,7 @@ export default function App() {
         activeColumn={activeColumn}
         onSelectColumn={column => selectColumn(view.table, column)}
         onBack={() => setView({ kind: 'diagram' })}
-        onPickFile={() => pickFile(view.table)}
+        onClear={() => clearTable(view.table)}
       />
     </>
   );

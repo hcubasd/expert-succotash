@@ -1,5 +1,5 @@
 import type { Bounds } from './geometryMaker';
-import { spanFromAnchor, thinFromCentroid } from './thinning';
+import { thinFromCentroid } from './thinning';
 
 // Desire lines consolidate the way the network does, with one thing removed:
 // there is no flood. A road's ownership has to respect what is reachable
@@ -107,14 +107,6 @@ function visibleIn(pool: EndpointPool, viewport: Bounds) {
   const candidates: number[] = [];
   for (let i = 0; i < pool.count; i++) if (visibleEndpoint[i]) candidates.push(i);
   return { candidates, visibleEdge };
-}
-
-// The coarsest useful exclusion for this view: the exact distance leaving the
-// anchor and the single endpoint farthest from it. See spanFromAnchor.
-export function maxDesireSpacing(positions: Float32Array, viewport: Bounds): number {
-  const pool = endpointsOf(positions);
-  const { candidates } = visibleIn(pool, viewport);
-  return spanFromAnchor(candidates, i => pool.x[i], i => pool.y[i]);
 }
 
 export type ConsolidatedFlow = {

@@ -1,5 +1,5 @@
 import type { Bounds, SegmentGeometry } from './geometryMaker';
-import { spanFromAnchor, thinFromCentroid } from './thinning';
+import { thinFromCentroid } from './thinning';
 
 // The network as a graph, so it can be simplified into a readable skeleton
 // rather than drawn link for link. At national extent the real thing is a
@@ -162,79 +162,6 @@ export function buildNodeGraph(segments: SegmentGeometry): NodeGraph {
   };
 }
 
-// A binary heap over (distance, node). The standard library has no priority
-// queue and the flood below pushes once per relaxation, so this is the one
-// piece of machinery worth writing out.
-class MinHeap {
-  private distances: Float64Array;
-  private nodes: Uint32Array;
-  private size = 0;
-
-  constructor(capacity: number) {
-    const room = Math.max(16, capacity);
-    this.distances = new Float64Array(room);
-    this.nodes = new Uint32Array(room);
-  }
-
-  get length() {
-    return this.size;
-  }
-
-  push(distance: number, node: number) {
-    if (this.size === this.distances.length) {
-      const grownD = new Float64Array(this.size * 2);
-      grownD.set(this.distances);
-      this.distances = grownD;
-      const grownN = new Uint32Array(this.size * 2);
-      grownN.set(this.nodes);
-      this.nodes = grownN;
-    }
-    let i = this.size++;
-    this.distances[i] = distance;
-    this.nodes[i] = node;
-    while (i > 0) {
-      const parent = (i - 1) >> 1;
-      if (this.distances[parent] <= this.distances[i]) break;
-      this.swap(parent, i);
-      i = parent;
-    }
-  }
-
-  pop(): number {
-    const top = this.nodes[0];
-    this.size--;
-    if (this.size > 0) {
-      this.distances[0] = this.distances[this.size];
-      this.nodes[0] = this.nodes[this.size];
-      let i = 0;
-      for (;;) {
-        const left = i * 2 + 1;
-        const right = left + 1;
-        let smallest = i;
-        if (left < this.size && this.distances[left] < this.distances[smallest]) smallest = left;
-        if (right < this.size && this.distances[right] < this.distances[smallest]) smallest = right;
-        if (smallest === i) break;
-        this.swap(smallest, i);
-        i = smallest;
-      }
-    }
-    return top;
-  }
-
-  private swap(a: number, b: number) {
-    const d = this.distances[a];
-    this.distances[a] = this.distances[b];
-    this.distances[b] = d;
-    const n = this.nodes[a];
-    this.nodes[a] = this.nodes[b];
-    this.nodes[b] = n;
-  }
-
-  peekDistance(): number {
-    return this.distances[0];
-  }
-}
-
 // Round joins need no array of their own: a line's endpoints laid out as
 // x1,y1,x2,y2 already *are* a list of x,y points, so the same buffer draws
 // the discs that cover the seams where quads meet.
@@ -259,11 +186,7 @@ export type VirtualNetwork = {
 export type Aggregation = 'sum' | 'mean';
 
 // The nodes and links a view actually needs to look at: whichever links have
-// at least one endpoint on screen, and the nodes those links touch. Shared
-// between simplifyNetwork and maxHubSpacing so the ceiling reported to the
-// slider is measured over exactly the set the algorithm itself runs on --
-// otherwise "detail all the way down" could stop meaning "exactly one hub"
-// for the view actually being shown.
+// at least one endpoint on screen, and the nodes those links touch.
 function visibleCandidates(graph: NodeGraph, viewport: Bounds) {
   const { nodeX, nodeY, linkA, linkB, linkCount } = graph;
   const inView = (n: number) =>
@@ -287,73 +210,25 @@ function visibleCandidates(graph: NodeGraph, viewport: Bounds) {
   return { candidates, visibleLink, visibleNode };
 }
 
-// The coarsest useful exclusion for this view: the exact distance that
-// leaves the anchor and the single node farthest from it standing. See
-// spanFromAnchor for why it is exact and unrounded, and why it is not the
-// point set's diameter -- on the real network the two differ by about 0.2%.
-export function maxHubSpacing(graph: NodeGraph, viewport: Bounds): number {
-  const { candidates } = visibleCandidates(graph, viewport);
-  return spanFromAnchor(candidates, n => graph.nodeX[n], n => graph.nodeY[n]);
-}
+// Once every node has an owner, turning that into a drawable virtual
+// network is one shared job. Every visible link falls into exactly one
+// bucket, decided by its two endpoints' owners: same owner means it sits
+// inside one hub's territory and is absorbed, different owners mean it
+// bridges two territories and becomes part of the virtual edge between
+// them. No link is counted twice and none needs a share-of-many-paths
+// correction, because ownership is a single label per node rather than a
+// set of routes.
+const NONE = 0xffffffff;
 
-export function simplifyNetwork(
+function buildVirtualNetwork(
   graph: NodeGraph,
   values: Float64Array,
-  viewport: Bounds,
-  exclusion: number,
+  visibleLink: Uint8Array,
+  owner: Uint32Array,
   aggregation: Aggregation,
 ): VirtualNetwork {
   const { nodeX, nodeY, linkA, linkB, linkCount } = graph;
-  const { candidates, visibleLink, visibleNode } = visibleCandidates(graph, viewport);
 
-  if (candidates.length === 0) {
-    return {
-      positions: new Float32Array(0),
-      values: new Float64Array(0),
-      endpointNode: new Int32Array(0),
-    };
-  }
-
-  const { kept: hubs } = thinFromCentroid(candidates, n => nodeX[n], n => nodeY[n], exclusion);
-
-  // Every hub floods outward at once and each node is claimed by whichever
-  // flood reaches it first, by road distance. That is one Dijkstra run with
-  // many sources, not one run per hub -- the queue is simply seeded with all
-  // of them at zero. No path is ever stored: the only thing kept is which
-  // hub owns each node, which is what partitions the graph.
-  const NONE = 0xffffffff;
-  const owner = new Uint32Array(graph.nodeCount).fill(NONE);
-  const distance = new Float64Array(graph.nodeCount).fill(Infinity);
-  const heap = new MinHeap(hubs.length * 4);
-
-  for (const hub of hubs) {
-    distance[hub] = 0;
-    owner[hub] = hub;
-    heap.push(0, hub);
-  }
-
-  while (heap.length > 0) {
-    const d = heap.peekDistance();
-    const node = heap.pop();
-    if (d > distance[node]) continue;
-    for (let slot = graph.adjStart[node]; slot < graph.adjStart[node + 1]; slot++) {
-      const next = graph.adjNode[slot];
-      if (!visibleNode[next]) continue;
-      const through = d + graph.adjLength[slot];
-      if (through < distance[next]) {
-        distance[next] = through;
-        owner[next] = owner[node];
-        heap.push(through, next);
-      }
-    }
-  }
-
-  // Every visible link now falls into exactly one bucket, decided by its two
-  // endpoints' owners: same owner means it sits inside one hub's territory
-  // and is absorbed, different owners mean it bridges two territories and
-  // becomes part of the virtual edge between them. No link is counted twice
-  // and none needs a share-of-many-paths correction, because ownership is a
-  // single label per node rather than a set of routes.
   type Edge = { sum: number; weight: number; a: number; b: number; count: number; link: number };
   const totals = new Map<number, Edge>();
 
@@ -435,4 +310,37 @@ export function simplifyNetwork(
   }
 
   return { positions, values: edgeValues, endpointNode };
+}
+
+// Ownership goes to whichever hub is nearest by straight line -- the exact
+// walk zones, agents and desire lines already use, not a road-distance
+// flood. A prior Dijkstra-based version (one multi-source flood along real
+// links) was measured against this at real-network scale (73k nodes, 158k
+// links): the flood plus its bookkeeping cost tens of milliseconds per
+// slider move, never free, and side by side on the real national-extent
+// network the two were visually indistinguishable. Point-collapse won and
+// the flood was removed rather than kept as a fallback.
+export function simplifyNetwork(
+  graph: NodeGraph,
+  values: Float64Array,
+  viewport: Bounds,
+  exclusion: number,
+  aggregation: Aggregation,
+): VirtualNetwork {
+  const { nodeX, nodeY } = graph;
+  const { candidates, visibleLink } = visibleCandidates(graph, viewport);
+
+  if (candidates.length === 0) {
+    return {
+      positions: new Float32Array(0),
+      values: new Float64Array(0),
+      endpointNode: new Int32Array(0),
+    };
+  }
+
+  const { owners } = thinFromCentroid(candidates, n => nodeX[n], n => nodeY[n], exclusion);
+  const owner = new Uint32Array(graph.nodeCount).fill(NONE);
+  for (let k = 0; k < candidates.length; k++) owner[candidates[k]] = owners[k];
+
+  return buildVirtualNetwork(graph, values, visibleLink, owner, aggregation);
 }

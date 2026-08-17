@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { consolidateDesireLines, endpointsOf, maxDesireSpacing } from '../src/lib/desireLines';
+import { consolidateDesireLines, endpointsOf } from '../src/lib/desireLines';
 
 const WIDE = { minX: -1e6, minY: -1e6, maxX: 1e6, maxY: 1e6 };
 
@@ -61,13 +61,13 @@ describe('consolidateDesireLines', () => {
     expect(Array.from(flow.positions.subarray(0, 4))).toEqual([0, 0, 1, 0]);
   });
 
-  it('leaves exactly one line at the coarse end', () => {
-    // Deliberately not evenly spaced: two buckets survive -- the anchor and
-    // the endpoint farthest from it -- so the single line between them is
-    // all that is left.
+  it('leaves exactly one line at the exact distance guaranteeing two buckets', () => {
+    // Deliberately not evenly spaced: pooled endpoints are (0,0), (1,0),
+    // (5,0), centroid (2,0). Anchor is (1,0), nearest at distance 1; farthest
+    // from it is (5,0) at distance 4. At exclusion 4, exactly those two
+    // survive, so the single line between them is all that is left.
     const spread = lines(0, 0, 1, 0, 1, 0, 5, 0);
-    const ceiling = maxDesireSpacing(spread, WIDE);
-    const flow = consolidateDesireLines(spread, flows(1, 1), WIDE, ceiling);
+    const flow = consolidateDesireLines(spread, flows(1, 1), WIDE, 4);
     expect(flow.positions.length / 4).toBe(1);
   });
 
@@ -75,13 +75,12 @@ describe('consolidateDesireLines', () => {
     // The one exception to "exactly two survive at the ceiling": the
     // guarantee rests on a single farthest point sitting alone on the strict
     // exclusion boundary, so an exactly symmetric layout keeps all of the
-    // tied points instead. Real projected coordinates essentially never tie
-    // to the last bit, but the behaviour is worth pinning rather than
-    // discovering.
+    // tied points instead. Pooled endpoints (0,0), (1,0), (2,0), centroid
+    // exactly (1,0) -- which is itself the anchor, tied 1 away from both
+    // neighbours. Real projected coordinates essentially never tie to the
+    // last bit, but the behaviour is worth pinning rather than discovering.
     const symmetric = lines(0, 0, 1, 0, 1, 0, 2, 0);
-    const ceiling = maxDesireSpacing(symmetric, WIDE);
-    expect(ceiling).toBe(1);
-    const flow = consolidateDesireLines(symmetric, flows(1, 1), WIDE, ceiling);
+    const flow = consolidateDesireLines(symmetric, flows(1, 1), WIDE, 1);
     expect(flow.positions.length / 4).toBe(2);
   });
 
@@ -112,19 +111,5 @@ describe('consolidateDesireLines', () => {
   it('has nothing to draw when nothing is on screen', () => {
     const flow = consolidateDesireLines(chain, chainFlows, { minX: 500, minY: 500, maxX: 501, maxY: 501 }, 0);
     expect(flow.positions.length).toBe(0);
-  });
-});
-
-describe('maxDesireSpacing', () => {
-  it('collapses everything to a single bucket the instant it is exceeded', () => {
-    const chain = lines(0, 0, 1, 0, 1, 0, 2, 0);
-    const ceiling = maxDesireSpacing(chain, WIDE);
-    const past = consolidateDesireLines(chain, flows(1, 1), WIDE, ceiling * (1 + 1e-9));
-    expect(past.positions.length).toBe(0);
-  });
-
-  it('is zero when nothing is visible', () => {
-    const chain = lines(0, 0, 1, 0);
-    expect(maxDesireSpacing(chain, { minX: 500, minY: 500, maxX: 501, maxY: 501 })).toBe(0);
   });
 });

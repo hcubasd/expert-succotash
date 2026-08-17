@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ZERO_ORIGIN, makePolygons } from '../src/lib/geometryMaker';
 import type { RawGeometry } from '../src/lib/rawTable';
-import { collapseZones, maxZoneSpacing } from '../src/lib/zoneShapes';
+import { collapseZones } from '../src/lib/zoneShapes';
 
 const WIDE = { minX: -1e6, minY: -1e6, maxX: 1e6, maxY: 1e6 };
 const polygon = (...rings: [number, number][][]): RawGeometry => ({ type: 'Polygon', coordinates: rings });
@@ -92,22 +92,5 @@ describe('collapseZones', () => {
     expect(collapsed.fillPositions).toBe(geometry.fillPositions);
     expect(collapsed.fillRow).toBe(geometry.fillRowIndex);
     expect(collapsed.borderPositions).toBe(geometry.borderPositions);
-  });
-});
-
-describe('maxZoneSpacing', () => {
-  it('stops one step short of the other layers, so a triangle is still possible', () => {
-    // Two survivors describe a line and a line has no area. An area layer has
-    // to leave three, which is the runner-up distance rather than the
-    // farthest.
-    const geometry = geometryOf(polygon(square));
-    const ceiling = maxZoneSpacing(geometry, WIDE);
-    const collapsed = collapseZones(geometry, WIDE, ceiling);
-    expect(triangles(collapsed)).toBeGreaterThanOrEqual(1);
-  });
-
-  it('is zero when nothing is visible', () => {
-    const geometry = geometryOf(polygon(square));
-    expect(maxZoneSpacing(geometry, { minX: 500, minY: 500, maxX: 501, maxY: 501 })).toBe(0);
   });
 });

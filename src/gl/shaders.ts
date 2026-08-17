@@ -108,11 +108,18 @@ export const POINT_VERT = `#version 300 es
   }
 `;
 
+// The quad is sized to the *outer* edge -- fill radius plus border, when
+// there is one -- so a_corner covers the whole disc including its ring.
+// u_innerRatio is where the fill stops and the border starts, as a fraction
+// of that outer radius: 1.0 draws no border band at all (the joins' case,
+// which share this shader but never get one), anything less carves a black
+// ring off the edge inward.
 export const POINT_FRAG = `#version 300 es
   precision highp float;
   in vec3 v_color;
   in vec2 v_corner;
   uniform float u_radiusPx;
+  uniform float u_innerRatio;
   out vec4 outColor;
   void main() {
     // Round the quad off into a disc -- but only once there is enough of it
@@ -124,8 +131,9 @@ export const POINT_FRAG = `#version 300 es
     // coverage. Below a two-pixel diameter the quad is left square, which
     // at that size is indistinguishable from a disc anyway and is the only
     // version that reliably puts ink down.
-    if (u_radiusPx > 1.0 && dot(v_corner, v_corner) > 1.0) discard;
-    outColor = vec4(v_color, 1.0);
+    float d2 = dot(v_corner, v_corner);
+    if (u_radiusPx > 1.0 && d2 > 1.0) discard;
+    outColor = d2 > u_innerRatio * u_innerRatio ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(v_color, 1.0);
   }
 `;
 

@@ -1,6 +1,6 @@
 import earcut from 'earcut';
 import type { Bounds, PolygonGeometry, PolygonRings } from './geometryMaker';
-import { spanFromAnchor, thinFromCentroid } from './thinning';
+import { thinFromCentroid } from './thinning';
 
 // Zones thin by moving their *points*, not by merging their areas.
 //
@@ -108,14 +108,6 @@ function visibleIn(geometry: PolygonGeometry, viewport: Bounds) {
   for (let n = 0; n < points.nodeCount; n++) if (visibleNode[n]) candidates.push(n);
 
   return { parts, candidates, points };
-}
-
-// The coarsest exclusion worth offering. Three survivors rather than two,
-// because two points describe a line and a line has no area: an area layer has
-// to stop one step earlier than the others to have a triangle left at the end.
-export function maxZoneSpacing(geometry: PolygonGeometry, viewport: Bounds): number {
-  const { candidates, points } = visibleIn(geometry, viewport);
-  return spanFromAnchor(candidates, n => points.nodeX[n], n => points.nodeY[n], 3);
 }
 
 export type CollapsedZones = {

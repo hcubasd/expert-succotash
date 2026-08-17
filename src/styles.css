@@ -8,10 +8,18 @@ html, body, #root {
   height: 100%;
 }
 
+:root {
+  /* One definition of "default size", so the overlay word buttons can match
+     it no matter what font size the view they sit in has squeezed itself
+     to. A table that fits its columns at 9px shouldn't shrink its Diagram
+     and Clear buttons along with them. */
+  --body-font-size: 13px;
+}
+
 body {
   overflow: hidden;
   font-family: system-ui, sans-serif;
-  font-size: 13px;
+  font-size: var(--body-font-size);
 }
 
 .bg {
@@ -50,4 +58,26 @@ body {
 
 .overlay-btn:hover {
   background: rgba(128, 128, 128, 0.95);
+}
+
+/* No background, body font size, floating over the canvas at a 1em margin:
+   the map/diagram/table canvas navigation words (Diagram, Back, Map,
+   Clear), deliberately plainer than overlay-btn's chip look. */
+.word-btn {
+  position: fixed;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+  /* Not 1em: these are children of roots whose font size gets squeezed to
+     fit content, and the buttons should read the same in every view. */
+  font-size: var(--body-font-size);
+  color: inherit;
+  user-select: none;
+  z-index: 2;
+}
+
+.word-btn:hover {
+  opacity: 0.6;
 }

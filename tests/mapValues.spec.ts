@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { loadCsv } from '../src/lib/csvLoader';
 import {
-  agentResources, featureValues, modeIsAvailable, toSelection, zoneResources,
+  agentRender, agentResources, desireLineRender, featureValues, modeIsAvailable,
+  networkRender, networkResources, networkVehicles, zoneRender, zoneResources,
 } from '../src/lib/mapValues';
 import type { Tables } from '../src/lib/mapValues';
 import { makeTable } from '../src/lib/tableMaker';
@@ -31,23 +32,25 @@ const network = makeTable('network', loadCsv('link_id,road_type,oneway,grade\n10
 const loads = makeTable(
   'network_loads',
   loadCsv(
-    'link_id,time_interval,vehicle,forward,vehicle_count,velocity,load_pct\n'
-    + '10,morning,truck,True,4,1,0.5\n'
-    + '10,morning,van,False,6,1,0.5\n'
-    + '10,evening,truck,True,99,1,0.5\n'
-    + '11,morning,truck,True,7,1,0.5\n',
+    'link_id,time_interval,vehicle,resource,forward,vehicle_count,velocity,load_pct\n'
+    + '10,morning,truck,pallets,True,4,1,0.5\n'
+    + '10,morning,truck,pallets,False,6,1,0.5\n'
+    + '10,morning,van,pallets,False,3,1,0.5\n'
+    + '10,evening,truck,pallets,True,99,1,0.5\n'
+    + '11,morning,truck,pallets,True,7,1,0.5\n',
   ),
 );
 
 const emissions = makeTable(
   'network_emissions',
   loadCsv(
-    'link_id,time_interval,vehicle,forward,pollutant,source,grams\n'
-    + '10,morning,truck,True,nox,exhaust,1.5\n'
-    + '10,morning,van,True,nox,exhaust,2.5\n'
-    + '10,morning,truck,True,nox,non-exhaust,100\n'
-    + '10,morning,truck,True,pm10,exhaust,900\n'
-    + '11,morning,truck,True,nox,exhaust,0.5\n',
+    'link_id,time_interval,vehicle,resource,forward,pollutant,source,grams\n'
+    + '10,morning,truck,pallets,True,nox,exhaust,1.5\n'
+    + '10,morning,truck,pallets,False,nox,exhaust,2.5\n'
+    + '10,morning,van,pallets,True,nox,exhaust,50\n'
+    + '10,morning,truck,pallets,True,nox,non-exhaust,100\n'
+    + '10,morning,truck,pallets,True,pm10,exhaust,900\n'
+    + '11,morning,truck,pallets,True,nox,exhaust,0.5\n',
   ),
 );
 
@@ -65,6 +68,13 @@ describe('resource discovery', () => {
   it('strips the suffix off agent columns, and keeps need and capacity apart', () => {
     expect(agentResources(tables, 'capacity')).toEqual(['pallets']);
     expect(agentResources(tables, 'need')).toEqual(['pallets', 'parcels']);
+  });
+
+  it('reads network resources and vehicles off whichever of loads or emissions is asked for', () => {
+    expect(networkResources(tables, 'loads')).toEqual(['pallets']);
+    expect(networkVehicles(tables, 'loads')).toEqual(['truck', 'van']);
+    expect(networkResources(tables, 'emissions')).toEqual(['pallets']);
+    expect(networkVehicles(tables, 'emissions')).toEqual(['truck', 'van']);
   });
 });
 
@@ -97,17 +107,20 @@ describe('featureValues', () => {
     expect(Number.isNaN(need[1])).toBe(true);
   });
 
-  it('sums vehicle counts per link within one interval, across vehicles and directions', () => {
-    const values = featureValues(tables, { mode: 'network', source: 'loads', timeInterval: 'morning' })!;
-    expect(values[0]).toBe(10); // 4 + 6, evening's 99 excluded
+  it('sums vehicle counts per link within one interval, resource and vehicle, across directions', () => {
+    const values = featureValues(tables, {
+      mode: 'network', source: 'loads', timeInterval: 'morning', vehicle: 'truck', resource: 'pallets',
+    })!;
+    expect(values[0]).toBe(10); // 4 + 6, both directions of truck; van's 3 and evening's 99 excluded
     expect(values[1]).toBe(7);
   });
 
-  it('sums emitted grams for one pollutant and source only', () => {
+  it('sums emitted grams for one pollutant and source only, across directions', () => {
     const values = featureValues(tables, {
-      mode: 'network', source: 'emissions', timeInterval: 'morning', pollutant: 'nox', emissionSource: 'exhaust',
+      mode: 'network', source: 'emissions', timeInterval: 'morning', vehicle: 'truck', resource: 'pallets',
+      pollutant: 'nox', emissionSource: 'exhaust',
     })!;
-    // 1.5 + 2.5; the non-exhaust 100 and the pm10 900 are both excluded
+    // 1.5 + 2.5; van's 50, the non-exhaust 100, and the pm10 900 are all excluded
     expect(values[0]).toBeCloseTo(4, 10);
     expect(values[1]).toBeCloseTo(0.5, 10);
   });
@@ -122,23 +135,67 @@ describe('featureValues', () => {
   });
 });
 
-describe('toSelection', () => {
-  it('stays null until every step of a mode is answered', () => {
-    expect(toSelection({ mode: 'zones' })).toBeNull();
-    expect(toSelection({ mode: 'zones', zoneSource: 'supply' })).toBeNull();
-    expect(toSelection({ mode: 'zones', zoneSource: 'supply', resource: 'pallets' })).not.toBeNull();
+describe('layer render resolvers', () => {
+  const active = { zones: true, agents: true, network: true, desire_lines: true };
+  const off = { zones: false, agents: false, network: false, desire_lines: false };
+
+  it('zoneRender: off without the toggle or the table, neutral without a complete pick, selected with one', () => {
+    expect(zoneRender({ active: off }, tables).kind).toBe('off');
+    expect(zoneRender({ active }, {}).kind).toBe('off'); // no zones table at all
+
+    expect(zoneRender({ active }, tables).kind).toBe('neutral'); // nothing picked yet
+    expect(zoneRender({ active, resource: 'all', zoneSource: 'supply' }, tables).kind).toBe('neutral');
+    expect(zoneRender({ active, resource: 'pallets' }, tables).kind).toBe('neutral'); // no zoneSource yet
+
+    const selected = zoneRender({ active, resource: 'pallets', zoneSource: 'supply' }, tables);
+    expect(selected).toEqual({
+      kind: 'selected', selection: { mode: 'zones', source: 'supply', resource: 'pallets' },
+    });
   });
 
-  it('takes grade with no further questions, but emissions with three', () => {
-    expect(toSelection({ mode: 'network', networkSource: 'grade' })).not.toBeNull();
-    expect(toSelection({ mode: 'network', networkSource: 'emissions', timeInterval: 'morning' })).toBeNull();
-    expect(toSelection({
-      mode: 'network',
-      networkSource: 'emissions',
-      timeInterval: 'morning',
-      pollutant: 'nox',
-      emissionSource: 'exhaust',
-    })).not.toBeNull();
+  it('agentRender: same shape as zones -- kind stands in for source', () => {
+    expect(agentRender({ active }, tables).kind).toBe('neutral');
+    const selected = agentRender({ active, resource: 'pallets', agentKind: 'need' }, tables);
+    expect(selected).toEqual({
+      kind: 'selected', selection: { mode: 'agents', kind: 'need', resource: 'pallets' },
+    });
+  });
+
+  it('desireLineRender: off with no table loaded, since this fixture has none', () => {
+    expect(desireLineRender({ active, resource: 'pallets' }, tables).kind).toBe('off');
+  });
+
+  it('networkRender: neutral only until a source is picked -- after that it never goes back', () => {
+    expect(networkRender({ active }, tables).kind).toBe('neutral'); // no source at all
+    expect(networkRender({ active, networkSource: 'grade' }, tables))
+      .toEqual({ kind: 'selected', selection: { mode: 'network', source: 'grade' } });
+  });
+
+  it("networkRender: missing dimensions default to 'all' rather than blocking the selection", () => {
+    // Unlike zones/agents, picking a source is enough on its own -- every
+    // other dimension defaults to the aggregate rather than staying neutral.
+    const bareLoads = networkRender({ active, networkSource: 'loads' }, tables);
+    expect(bareLoads).toEqual({
+      kind: 'selected',
+      selection: { mode: 'network', source: 'loads', timeInterval: 'all', vehicle: 'all', resource: 'all' },
+    });
+
+    const pinnedLoads = networkRender(
+      { active, networkSource: 'loads', timeInterval: 'morning', vehicle: 'truck', resource: 'pallets' }, tables,
+    );
+    expect(pinnedLoads).toEqual({
+      kind: 'selected',
+      selection: { mode: 'network', source: 'loads', timeInterval: 'morning', vehicle: 'truck', resource: 'pallets' },
+    });
+
+    const bareEmissions = networkRender({ active, networkSource: 'emissions' }, tables);
+    expect(bareEmissions).toEqual({
+      kind: 'selected',
+      selection: {
+        mode: 'network', source: 'emissions',
+        timeInterval: 'all', vehicle: 'all', resource: 'all', pollutant: 'all', emissionSource: 'all',
+      },
+    });
   });
 });
 

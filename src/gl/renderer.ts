@@ -39,7 +39,7 @@ export type Scene = {
     jointColors: Uint8Array;
     widthCssPx: number;
   } | null;
-  agents: { positions: Float32Array; colors: Uint8Array; radiusCssPx: number } | null;
+  agents: { positions: Float32Array; colors: Uint8Array; radiusCssPx: number; borderCssPx: number } | null;
   desireLines: {
     positions: Float32Array;
     quantities: Float32Array;
@@ -272,7 +272,10 @@ export class MapRenderer {
   }
 
   // Instanced discs, used both for agent dots and for the round joins that
-  // cover the seam where two link quads meet at a shared endpoint.
+  // cover the seam where two link quads meet at a shared endpoint. Joins
+  // never carry a border -- they exist to blend into the lines around them,
+  // not to be outlined -- so borderCssPx defaults to none and only the
+  // agents call site passes a real one.
   private drawPoints(
     key: string,
     positions: Float32Array,
@@ -282,6 +285,7 @@ export class MapRenderer {
     width: number,
     height: number,
     pixelRatio: number,
+    borderCssPx = 0,
   ) {
     if (positions.length === 0) return;
     const gl = this.gl;
@@ -289,13 +293,18 @@ export class MapRenderer {
     gl.bindVertexArray(this.pointsVao);
     gl.useProgram(this.points);
     this.setTransform(this.points, view);
-    const radius = radiusCssPx * pixelRatio;
+    const fillRadius = radiusCssPx * pixelRatio;
+    const outerRadius = fillRadius + borderCssPx * pixelRatio;
     gl.uniform2f(
       gl.getUniformLocation(this.points, 'u_pixelRadius'),
-      (radius * 2) / width,
-      (radius * 2) / height,
+      (outerRadius * 2) / width,
+      (outerRadius * 2) / height,
     );
-    gl.uniform1f(gl.getUniformLocation(this.points, 'u_radiusPx'), radius);
+    gl.uniform1f(gl.getUniformLocation(this.points, 'u_radiusPx'), outerRadius);
+    gl.uniform1f(
+      gl.getUniformLocation(this.points, 'u_innerRatio'),
+      outerRadius > 0 ? fillRadius / outerRadius : 1,
+    );
 
     const cornerLoc = gl.getAttribLocation(this.points, 'a_corner');
     gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
@@ -678,6 +687,7 @@ export class MapRenderer {
         width,
         height,
         scene.pixelRatio,
+        scene.agents.borderCssPx,
       );
     }
 

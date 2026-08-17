@@ -105,10 +105,17 @@ describe('thinAgents', () => {
     }
   });
 
-  it('leaves exactly two circles at the coarse end', () => {
-    // The anchor and the single agent farthest from it -- the exact
-    // geometric limit of the control, not a padded approximation.
-    expect(thinAgents(positions, values, viewport, 1, 1, 0).values.length).toBe(2);
+  it('collapses to the single anchor at the coarse end, once the viewport dwarfs the data', () => {
+    // The ceiling is the viewport diagonal now, not this layer's own exact
+    // 2-survivor distance -- deliberately an overshoot, so that "coarse end"
+    // means the same real merge radius for every layer sharing the slider.
+    // Here the four agents span 3 world units inside a 200x200 viewport, so
+    // even the farthest pair (distance 3) sits well inside the ~283 diagonal
+    // and gets absorbed too: one circle, not two. The exact-boundary,
+    // exactly-two-survivors property itself is still true and is covered
+    // directly by thinFromCentroid's own tests -- it just no longer sits at
+    // this control's coarse end.
+    expect(thinAgents(positions, values, viewport, 1, 1, 0).values.length).toBe(1);
   });
 
   it('skips agents with no value for the selected resource entirely', () => {

@@ -1,298 +1,248 @@
 import { grayAt, rgbStr } from '../lib/colors';
 import type { Legend } from '../lib/mapScene';
 import {
-  agentResources, desireLineResources, modeIsAvailable, stratumOptions, toSelection, zoneResources,
+  agentRender, agentResources, allResources, desireLineRender,
+  modeIsAvailable, networkRender, networkVehicles, stratumOptions, zoneRender,
 } from '../lib/mapValues';
-import type { AgentKind, Draft, MapMode, Tables, ZoneSource } from '../lib/mapValues';
+import type { Draft, LayerRender, MapMode, Tables } from '../lib/mapValues';
+import Dropdown, { INACTIVE } from './Dropdown';
+import type { Option } from './Dropdown';
+import LegendCanvas from './LegendCanvas';
 
 type Props = {
   tables: Tables;
   draft: Draft;
   onDraft: (draft: Draft) => void;
-  legend: Legend | null;
+  legends: { zones: Legend | null; agents: Legend | null; network: Legend | null };
+  flowLegend: Legend | null;
   detail: number;
   onDetail: (detail: number) => void;
-  onDiagram: () => void;
 };
 
-const MODES: { id: MapMode; label: string }[] = [
-  { id: 'zones', label: 'zones' },
-  { id: 'desire_lines', label: 'desire lines' },
-  { id: 'agents', label: 'agents' },
-  { id: 'network', label: 'network' },
+const ALL: Option = { value: 'all', label: 'All' };
+const LAYERS: { mode: MapMode; label: string }[] = [
+  { mode: 'zones', label: 'zones' },
+  { mode: 'network', label: 'network' },
+  { mode: 'desire_lines', label: 'desire lines' },
+  { mode: 'agents', label: 'agents' },
 ];
+// Every layer's column holds the same number of card slots, so the legends
+// underneath all start at the same height. Network needs the most: value,
+// then time interval, vehicle, pollutant and source.
+const CARD_SLOTS = 5;
 
-const ZONE_SOURCES: { id: ZoneSource; label: string }[] = [
-  { id: 'supply', label: 'supply' },
-  { id: 'demand', label: 'demand' },
-  { id: 'needs', label: 'E.V. agent need' },
-  { id: 'capacities', label: 'E.V. agent capacity' },
-];
+const optionsOf = (values: string[]): Option[] => values.map(v => ({ value: v, label: v }));
+const slider = grayAt(0.5);
 
-const shell = grayAt(0.96);
-const idle = grayAt(0.89);
-const chosen = grayAt(0.73912);
+type Card = { options: Option[]; selected: string | undefined; label: string };
 
-function Choice({ label, active, disabled, onClick }: {
-  label: string; active: boolean; disabled?: boolean; onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        border: 'none',
-        borderRadius: 3,
-        padding: '5px 9px',
-        font: 'inherit',
-        fontSize: 12,
-        cursor: disabled ? 'default' : 'pointer',
-        background: rgbStr(active ? chosen : idle),
-        color: disabled ? 'rgba(0,0,0,0.3)' : '#000',
-        opacity: disabled ? 0.55 : 1,
-        textAlign: 'left',
-      }}
-    >
-      {label}
-    </button>
-  );
+function padSlots(cards: Card[]): (Card | null)[] {
+  const out: (Card | null)[] = [...cards];
+  while (out.length < CARD_SLOTS) out.push(null);
+  return out;
 }
 
-function Row({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-      <span style={{ fontSize: 10, letterSpacing: 0.6, textTransform: 'uppercase', opacity: 0.55 }}>{title}</span>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>{children}</div>
-    </div>
-  );
+// What a card reads as once something is picked: the option's own label, not
+// the raw value behind it -- the network source card should say "vehicle
+// count", never "loads". Falls back to the card's own name as a placeholder
+// while nothing is selected.
+function labelOf(card: Card): string {
+  return card.options.find(option => option.value === card.selected)?.label ?? card.label;
 }
 
-// The bar shows the ramp's colours at even spacing, because they are evenly
-// spaced -- equally far apart around the wheel. It's the tick *values* that
-// bunch up, and that asymmetry is the equalization being honest: a crowded
-// band of the data really does get more of the ramp than a sparse one.
-function LegendBar({ legend }: { legend: Legend }) {
+// Grayed when there's nothing chosen yet, or when what *is* chosen has no
+// data behind it -- the same signal the map gives by leaving that layer
+// uncoloured, said again where the choice was made.
+function isGrayed(card: Card): boolean {
+  const current = card.options.find(option => option.value === card.selected);
+  return !current || !!current.unavailable;
+}
+
+export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, detail, onDetail }: Props) {
+  const resourceOptions: Option[] = [ALL, ...optionsOf(allResources(tables))];
+
+  // --- zones: one card, no All -- supply/demand/needs/capacities are
+  // different quantities with different units, not slices of one that could
+  // ever be summed together. All four are always offered, marked when the
+  // file behind them isn't loaded: hiding them would leave no way to see
+  // that the option exists at all, which is worse than showing it grayed.
+  const zoneCards: Card[] = [
+    {
+      options: (['supply', 'demand', 'needs', 'capacities'] as const).map(source => ({
+        value: source, label: source, unavailable: !tables[source],
+      })),
+      selected: draft.zoneSource,
+      label: 'value',
+    },
+  ];
+
+  // --- agents: one card, no All -- same reasoning as zones. Availability
+  // here is per resource rather than per file: agents.gpkg carries a
+  // {resource}_need / {resource}_capacity column only for the resources it
+  // actually has.
+  const agentCards: Card[] = [
+    {
+      options: (['need', 'capacity'] as const).map(kind => ({
+        value: kind,
+        label: kind,
+        unavailable: !!draft.resource && draft.resource !== 'all'
+          && !agentResources(tables, kind).includes(draft.resource),
+      })),
+      selected: draft.agentKind,
+      label: 'value',
+    },
+  ];
+
+  // --- network: up to five -- source, then time interval / vehicle / (for
+  // emissions) pollutant / source, every one of which gets an All, because
+  // each is a real slice of the same summable quantity. Grade stays offered
+  // when neither loads nor emissions is loaded, so a file set with only
+  // network.gpkg still has something to show rather than a blank column.
+  const hasLoads = !!tables.network_loads;
+  const hasEmissions = !!tables.network_emissions;
+  const networkSourceOptions: Option[] = [
+    ...(hasLoads ? [{ value: 'loads', label: 'vehicle count' }] : []),
+    ...(hasEmissions ? [{ value: 'emissions', label: 'emissions' }] : []),
+    ...(!hasLoads && !hasEmissions && tables.network ? [{ value: 'grade', label: 'grade' }] : []),
+  ];
+  const netSource = draft.networkSource;
+  const netTakesDimensions = netSource === 'loads' || netSource === 'emissions';
+  const netFileSource = netSource === 'emissions' ? 'emissions' : 'loads';
+
+  const networkCards: Card[] = [
+    { options: networkSourceOptions, selected: netSource, label: 'value' },
+    {
+      options: netTakesDimensions
+        ? [ALL, ...optionsOf(stratumOptions(
+            netFileSource === 'emissions' ? tables.network_emissions : tables.network_loads, 'time_interval',
+          ))]
+        : [],
+      selected: draft.timeInterval,
+      label: 'time interval',
+    },
+    {
+      options: netTakesDimensions ? [ALL, ...optionsOf(networkVehicles(tables, netFileSource))] : [],
+      selected: draft.vehicle,
+      label: 'vehicle',
+    },
+    {
+      options: netSource === 'emissions'
+        ? [ALL, ...optionsOf(stratumOptions(tables.network_emissions, 'pollutant'))]
+        : [],
+      selected: draft.pollutant,
+      label: 'pollutant',
+    },
+    {
+      options: netSource === 'emissions'
+        ? [ALL, ...optionsOf(stratumOptions(tables.network_emissions, 'source'))]
+        : [],
+      selected: draft.emissionSource,
+      label: 'source',
+    },
+  ];
+
+  // --- desire lines: none -- the shared resource picker is all it uses.
+  const cardsFor: Record<MapMode, Card[]> = {
+    zones: zoneCards, agents: agentCards, network: networkCards, desire_lines: [],
+  };
+  const legendFor: Record<MapMode, Legend | null> = {
+    zones: legends.zones, agents: legends.agents, network: legends.network, desire_lines: flowLegend,
+  };
+  const renderFor: Record<MapMode, LayerRender> = {
+    zones: zoneRender(draft, tables),
+    agents: agentRender(draft, tables),
+    network: networkRender(draft, tables),
+    desire_lines: desireLineRender(draft, tables),
+  };
+
+  // Which draft field each layer's nth card writes to. Selecting a network
+  // source drops everything downstream of it: a time interval or vehicle
+  // picked for loads doesn't necessarily exist for emissions.
+  function select(mode: MapMode, slot: number, value: string) {
+    if (mode === 'zones') return onDraft({ ...draft, zoneSource: value as Draft['zoneSource'] });
+    if (mode === 'agents') return onDraft({ ...draft, agentKind: value as Draft['agentKind'] });
+    if (mode !== 'network') return;
+    if (slot === 0) {
+      return onDraft({
+        ...draft, networkSource: value as Draft['networkSource'],
+        timeInterval: undefined, vehicle: undefined, pollutant: undefined, emissionSource: undefined,
+      });
+    }
+    if (slot === 1) return onDraft({ ...draft, timeInterval: value });
+    if (slot === 2) return onDraft({ ...draft, vehicle: value });
+    if (slot === 3) return onDraft({ ...draft, pollutant: value });
+    if (slot === 4) return onDraft({ ...draft, emissionSource: value });
+  }
+
+  function toggleLayer(mode: MapMode) {
+    onDraft({ ...draft, active: { ...draft.active, [mode]: !draft.active[mode] } });
+  }
+
   return (
-    <div style={{ display: 'flex', gap: 8, minHeight: 0, flex: 1 }}>
-      <div style={{ display: 'flex', flexDirection: 'column-reverse', width: 26, borderRadius: 2, overflow: 'hidden' }}>
-        {legend.ramp.map((color, i) => (
-          <div key={i} style={{ flex: 1, background: rgbStr(color) }} />
-        ))}
+    <div className="bg" style={{ flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+      <Dropdown
+        options={resourceOptions}
+        selected={draft.resource}
+        label={labelOf({ options: resourceOptions, selected: draft.resource, label: 'resource' })}
+        grayed={!draft.resource}
+        onSelect={resource => onDraft({ ...draft, resource })}
+      />
+
+      <div className="bg" style={{ flex: 1, minHeight: 0 }}>
+        {LAYERS.map(({ mode, label }) => {
+          const available = modeIsAvailable(tables, mode);
+          const on = available && draft.active[mode];
+          return (
+            <div key={mode} className="bg" style={{ flexDirection: 'column', flex: 1, minWidth: 0 }}>
+              {/* Off, or not loaded, is said with the label's color alone --
+                  no extra "(off)" text. Changing the text would change what
+                  squeezeFg has to fit, so every toggle would resize every
+                  label in the panel; changing only the color leaves the
+                  layout completely alone. */}
+              <div
+                className="bg"
+                style={{ cursor: available ? 'pointer' : 'default' }}
+                onClick={available ? () => toggleLayer(mode) : undefined}
+              >
+                <div className="fg" style={{ color: on ? undefined : INACTIVE }}>{label}</div>
+              </div>
+
+              {padSlots(cardsFor[mode]).map((card, slot) => (
+                <Dropdown
+                  key={slot}
+                  options={card?.options ?? []}
+                  selected={card?.selected}
+                  label={card ? labelOf(card) : ''}
+                  empty={!card || card.options.length === 0}
+                  grayed={!on || !card || isGrayed(card)}
+                  onSelect={value => select(mode, slot, value)}
+                />
+              ))}
+
+              <div className="bg" style={{ flex: 1, minHeight: 0 }}>
+                {on && renderFor[mode].kind === 'selected' && legendFor[mode]
+                  ? <LegendCanvas legend={legendFor[mode]!} />
+                  : null}
+              </div>
+            </div>
+          );
+        })}
       </div>
-      <div style={{ position: 'relative', flex: 1, fontSize: 10 }}>
-        {legend.ticks.map(({ t, value }) => (
-          <div
-            key={t}
-            style={{
-              position: 'absolute',
-              bottom: `${t * 100}%`,
-              transform: 'translateY(50%)',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            <span style={{ opacity: 0.35 }}>— </span>
-            {Number.isFinite(value) ? value.toPrecision(4).replace(/\.?0+$/, '') : ''}
-          </div>
-        ))}
+
+      <div className="bg" style={{ padding: '1em' }}>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          // No quantization: a native slider is already bounded to one
+          // distinct position per pixel of its own track, so a numeric step
+          // could only ever make that coarser, never finer.
+          step="any"
+          value={detail}
+          onChange={event => onDetail(Number(event.target.value))}
+          style={{ width: '100%', accentColor: rgbStr(slider) }}
+        />
       </div>
-    </div>
-  );
-}
-
-export default function MapPanel({
-  tables, draft, onDraft, legend, detail, onDetail, onDiagram,
-}: Props) {
-  const complete = toSelection(draft) !== null;
-
-  const resources =
-    draft.mode === 'zones' && draft.zoneSource ? zoneResources(tables, draft.zoneSource)
-    : draft.mode === 'desire_lines' ? desireLineResources(tables)
-    : draft.mode === 'agents' && draft.agentKind ? agentResources(tables, draft.agentKind)
-    : [];
-
-  const intervals = stratumOptions(
-    draft.networkSource === 'emissions' ? tables.network_emissions : tables.network_loads,
-    'time_interval',
-  );
-  const pollutants = stratumOptions(tables.network_emissions, 'pollutant');
-  const emissionSources = stratumOptions(tables.network_emissions, 'source');
-
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 14,
-        padding: 14,
-        // Claims the whole remainder rather than shrinking to its content:
-        // the panel is the other half of the view, not a floating card.
-        flex: 1,
-        minWidth: 0,
-        minHeight: 0,
-        overflow: 'auto',
-        background: rgbStr(shell),
-        color: '#000',
-        fontFamily: 'inherit',
-      }}
-    >
-      <Row title="map">
-        {MODES.map(({ id, label }) => (
-          <Choice
-            key={id}
-            label={label}
-            active={draft.mode === id}
-            disabled={!modeIsAvailable(tables, id)}
-            // Switching mode drops everything downstream of it -- a resource
-            // chosen for supply means nothing to the network.
-            onClick={() => onDraft({ mode: draft.mode === id ? null : id })}
-          />
-        ))}
-      </Row>
-
-      {draft.mode === 'zones' && (
-        <Row title="value">
-          {ZONE_SOURCES.map(({ id, label }) => (
-            <Choice
-              key={id}
-              label={label}
-              active={draft.zoneSource === id}
-              disabled={!tables[id]}
-              onClick={() => onDraft({ mode: 'zones', zoneSource: id })}
-            />
-          ))}
-        </Row>
-      )}
-
-      {draft.mode === 'agents' && (
-        <Row title="value">
-          {(['need', 'capacity'] as AgentKind[]).map(kind => (
-            <Choice
-              key={kind}
-              label={kind}
-              active={draft.agentKind === kind}
-              onClick={() => onDraft({ mode: 'agents', agentKind: kind })}
-            />
-          ))}
-        </Row>
-      )}
-
-      {draft.mode === 'network' && (
-        <Row title="value">
-          <Choice
-            label="grade"
-            active={draft.networkSource === 'grade'}
-            onClick={() => onDraft({ mode: 'network', networkSource: 'grade' })}
-          />
-          <Choice
-            label="vehicle count"
-            active={draft.networkSource === 'loads'}
-            disabled={!tables.network_loads}
-            onClick={() => onDraft({ mode: 'network', networkSource: 'loads' })}
-          />
-          <Choice
-            label="emissions"
-            active={draft.networkSource === 'emissions'}
-            disabled={!tables.network_emissions}
-            onClick={() => onDraft({ mode: 'network', networkSource: 'emissions' })}
-          />
-        </Row>
-      )}
-
-      {draft.mode === 'network' && draft.networkSource && draft.networkSource !== 'grade' && (
-        <Row title="time interval">
-          {intervals.map(interval => (
-            <Choice
-              key={interval}
-              label={interval}
-              active={draft.timeInterval === interval}
-              onClick={() => onDraft({ ...draft, timeInterval: interval })}
-            />
-          ))}
-        </Row>
-      )}
-
-      {draft.mode === 'network' && draft.networkSource === 'emissions' && (
-        <>
-          <Row title="pollutant">
-            {pollutants.map(pollutant => (
-              <Choice
-                key={pollutant}
-                label={pollutant}
-                active={draft.pollutant === pollutant}
-                onClick={() => onDraft({ ...draft, pollutant })}
-              />
-            ))}
-          </Row>
-          <Row title="source">
-            {emissionSources.map(source => (
-              <Choice
-                key={source}
-                label={source}
-                active={draft.emissionSource === source}
-                onClick={() => onDraft({ ...draft, emissionSource: source })}
-              />
-            ))}
-          </Row>
-        </>
-      )}
-
-      {resources.length > 0 && (
-        <Row title="resource">
-          {resources.map(resource => (
-            <Choice
-              key={resource}
-              label={resource}
-              active={draft.resource === resource}
-              onClick={() => onDraft({ ...draft, resource })}
-            />
-          ))}
-        </Row>
-      )}
-
-      {complete && legend && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1, minHeight: 160 }}>
-          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-            <span style={{ fontSize: 10, letterSpacing: 0.6, textTransform: 'uppercase', opacity: 0.55 }}>
-              legend
-            </span>
-            <Choice
-              label="clear"
-              active={false}
-              // Leaving the legend drops the resource, not the mode: the map
-              // falls back to its hollow basemap and the resource has to be
-              // picked again to colour anything.
-              onClick={() => onDraft({ ...draft, resource: undefined })}
-            />
-          </div>
-          <LegendBar legend={legend} />
-        </div>
-      )}
-
-      {/* One control shared by every layer that thins: how far things are
-          collapsed before they're drawn. At the far right nothing is
-          collapsed -- roads keep their own shape, agents are one device
-          pixel each, desire lines are agent to agent. At the far left only
-          the two most distant features survive. */}
-      {draft.mode !== null && (
-        <Row title="detail">
-          <input
-            type="range"
-            min={0}
-            max={1}
-            // No quantization: a native slider is already bounded to one
-            // distinct position per pixel of its own track, so a numeric
-            // step could only ever make that coarser, never finer.
-            step="any"
-            value={detail}
-            onChange={event => onDetail(Number(event.target.value))}
-            style={{ width: '100%', accentColor: rgbStr(chosen) }}
-          />
-        </Row>
-      )}
-
-      <button className="overlay-btn" style={{ position: 'static', marginTop: 'auto' }} onClick={onDiagram}>
-        diagram →
-      </button>
     </div>
   );
 }

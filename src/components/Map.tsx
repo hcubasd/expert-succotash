@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { colorBg, squeezeFg } from 'psychic-potato';
 import { MapRenderer } from '../gl/renderer';
 import type { View } from '../gl/renderer';
-import { boundsForMode } from '../lib/geometryMaker';
+import { boundsOf } from '../lib/geometryMaker';
 import type { Bounds, Geometries } from '../lib/geometryMaker';
+import { LUMINANCE } from '../lib/colors';
 import { DEFAULT_DETAIL, buildScene, legendFromFlow } from '../lib/mapScene';
-import type { Legend } from '../lib/mapScene';
-import { toSelection } from '../lib/mapValues';
+import type { BuiltScene, Legend } from '../lib/mapScene';
 import type { Draft, Tables } from '../lib/mapValues';
 import MapPanel from './MapPanel';
 
@@ -67,8 +68,11 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
   // Zoom lives in a ref so the transform is never a render's worth of work
   // behind; this is what tells the draw effect the view moved.
   const [viewVersion, setViewVersion] = useState(0);
+  // Every zoom-rectangle commit pushes the view it replaced, so Back walks
+  // out exactly one step at a time, all the way to the fit it started from.
+  const [history, setHistory] = useState<View[]>([]);
   const [flowLegend, setFlowLegend] = useState<Legend | null>(null);
-  const [staticLegend, setStaticLegend] = useState<Legend | null>(null);
+  const [legends, setLegends] = useState<BuiltScene['legends']>({ zones: null, agents: null, network: null });
   // detail is what the slider shows and moves instantly; committedDetail is
   // what actually drives a recompute. Kept as two states even at zero delay,
   // so a real debounce is a constant to change, not new wiring to add.
@@ -84,10 +88,6 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
     const timer = setTimeout(() => setCommittedDetail(detail), delay);
     return () => clearTimeout(timer);
   }, [detail]);
-
-  const selection = useMemo(() => toSelection(draft), [draft]);
-  // The fit follows the mode, so changing mode reframes onto that layer.
-  const bounds = useMemo(() => boundsForMode(geometries, draft.mode), [geometries, draft.mode]);
 
   // Creation, measurement and draw are all layout effects in this order:
   // a passive effect for creation would run *after* the draw and leave the
@@ -127,13 +127,42 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
     return () => observer.disconnect();
   }, []);
 
+  // The panel's own colors and shared font size. Both start from the map
+  // root rather than the panel: the root is the outermost .bg, so it has to
+  // be the depth the ramp counts from, and it starts at the palette's own
+  // luminance exactly like the table view does. squeezeFg is bounded above
+  // by the body font -- it happily grows text to fill a wide card, which at
+  // a few short labels reads as a headline rather than a control.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const fit = () => {
+      colorBg(root, { from: LUMINANCE, to: 1 });
+      try {
+        const fitted = squeezeFg(root, 0.98);
+        const bodySize = parseFloat(getComputedStyle(document.body).fontSize);
+        root.style.fontSize = `${Math.min(fitted, bodySize)}px`;
+      } catch {
+        // nothing measurable yet
+      }
+    };
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [tables, draft, legends, flowLegend, portrait]);
+
   // Positions never change once loaded, but the buffers are keyed per
   // geometry object -- a reloaded file means new arrays and a new upload.
+  // Fits to everything loaded, not just whichever layers are toggled on:
+  // toggling a layer is a filter on what's already framed, not a reason to
+  // move the camera, so only a real geometry change re-fits here.
   useLayoutEffect(() => {
     rendererRef.current?.invalidate();
-    viewRef.current = fitView(bounds, size.width, size.height);
+    viewRef.current = fitView(boundsOf(geometries), size.width, size.height);
+    setHistory([]);
     setViewVersion(v => v + 1);
-  }, [geometries, bounds, size.width, size.height]);
+  }, [geometries, size.width, size.height]);
 
   useLayoutEffect(() => {
     const renderer = rendererRef.current;
@@ -143,7 +172,7 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
     const built = buildScene(
       tables,
       geometries,
-      selection,
+      draft,
       view,
       pixelsPerUnit(view, size.width),
       size.ratio,
@@ -151,11 +180,11 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
     );
     const stats = renderer.render(built.scene);
 
-    setStaticLegend(built.legend);
+    setLegends(built.legends);
     // Desire lines can only be measured by drawing them, so their legend
     // arrives with the render's return value rather than ahead of it.
     setFlowLegend(built.pendingFlowRamp && stats ? legendFromFlow(stats, built.pendingFlowRamp) : null);
-  }, [tables, geometries, selection, size, viewVersion, committedDetail]);
+  }, [tables, geometries, draft, size, viewVersion, committedDetail]);
 
   function toWorld(clientX: number, clientY: number) {
     const canvas = canvasRef.current!;
@@ -190,36 +219,50 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
 
     const a = toWorld(current.x0, current.y0);
     const b = toWorld(current.x1, current.y1);
+    // Captured before the ref is overwritten, not read from inside the
+    // setHistory updater: a functional updater runs lazily, during React's
+    // batched commit, which is *after* every synchronous line below it --
+    // by the time h => [...h, viewRef.current] actually ran, the very next
+    // line had already mutated viewRef.current to the new view, so every
+    // zoom was pushing the view it was zooming *into*. That shifted the
+    // whole stack by one: the first Back click always popped the view
+    // already on screen (a no-op that looked like nothing happened), and
+    // only the second click reached the actually-previous one.
+    const previous = viewRef.current;
     viewRef.current = fitView(
       { minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x), minY: Math.min(a.y, b.y), maxY: Math.max(a.y, b.y) },
       size.width,
       size.height,
     );
+    setHistory(h => [...h, previous]);
     setViewVersion(v => v + 1);
   }
 
-  const reset = useCallback(() => {
-    viewRef.current = fitView(bounds, size.width, size.height);
+  // Reads the popped view straight from state rather than from inside a
+  // setHistory updater: an updater has to be pure, and React calls it twice
+  // in development, which meant the old version moved the camera two steps
+  // per click and left the button fighting itself.
+  const goBack = useCallback(() => {
+    if (history.length === 0) return;
+    viewRef.current = history[history.length - 1];
+    setHistory(history.slice(0, -1));
     setViewVersion(v => v + 1);
-  }, [bounds, size.width, size.height]);
-
-  const empty = !geometries.zones && !geometries.network && !geometries.desireLines && !geometries.agents;
+  }, [history]);
 
   return (
+    // The whole view is the colorBg root, so the 1px gap between canvas and
+    // panel falls out of .bg's own gap rule rather than being drawn -- the
+    // same way every other seam in the app is made. The canvas wrapper is
+    // deliberately a plain div: it takes no color of its own and, not being
+    // a .bg, never counts toward the nesting depth the panel's ramp is
+    // measured against.
     <div
       ref={rootRef}
-      style={{
-        display: 'flex',
-        flexDirection: portrait ? 'column' : 'row',
-        width: '100vw',
-        height: '100vh',
-        background: '#fff',
-        color: '#000',
-      }}
+      className="bg"
+      style={{ flexDirection: portrait ? 'column' : 'row', width: '100vw', height: '100vh', color: '#000' }}
     >
-      {/* The canvas is square in both orientations, so the world never
-          distorts and the zoom rectangle is read in the same units it was
-          drawn in. */}
+      {/* Square in both orientations, so the world never distorts and the
+          zoom rectangle is read in the same units it was drawn in. */}
       <div
         style={{
           position: 'relative',
@@ -250,33 +293,39 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
           />
         )}
 
-        {(empty || failed) && (
+        {/* Only a real failure says anything. An empty canvas with no files
+            loaded is just an empty canvas. */}
+        {failed && (
           <div
             style={{
               position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-              pointerEvents: 'none', opacity: 0.5, fontSize: 14, textAlign: 'center', padding: 24,
+              pointerEvents: 'none', opacity: 0.5, textAlign: 'center', padding: 24,
             }}
           >
-            {failed ?? 'load files in the diagram view to render the map'}
+            {failed}
           </div>
         )}
 
-        <button className="overlay-btn" style={{ position: 'absolute', top: 12, right: 12 }} onClick={reset}>
-          reset view
+        {history.length > 0 && (
+          <button className="word-btn" style={{ position: 'absolute', bottom: '1em', left: '1em' }} onClick={goBack}>
+            Back
+          </button>
+        )}
+
+        <button className="word-btn" style={{ position: 'absolute', bottom: '1em', right: '1em' }} onClick={onDiagram}>
+          Diagram
         </button>
       </div>
 
-      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex' }}>
-        <MapPanel
-          tables={tables}
-          draft={draft}
-          onDraft={onDraft}
-          legend={flowLegend ?? staticLegend}
-          detail={detail}
-          onDetail={setDetail}
-          onDiagram={onDiagram}
-        />
-      </div>
+      <MapPanel
+        tables={tables}
+        draft={draft}
+        onDraft={onDraft}
+        legends={legends}
+        flowLegend={flowLegend}
+        detail={detail}
+        onDetail={setDetail}
+      />
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ZERO_ORIGIN, makeSegments } from '../src/lib/geometryMaker';
 import type { RawGeometry } from '../src/lib/rawTable';
-import { buildNodeGraph, maxHubSpacing, simplifyNetwork } from '../src/lib/networkGraph';
+import { buildNodeGraph, simplifyNetwork } from '../src/lib/networkGraph';
 import { thinFromCentroid } from '../src/lib/thinning';
 
 const line = (coords: [number, number][]): RawGeometry => ({ type: 'LineString', coordinates: coords });
@@ -110,14 +110,6 @@ describe('simplifyNetwork', () => {
     expect(virtual.values[0]).toBe(4);
   });
 
-  it('survives a component no hub ever reaches', () => {
-    // Islands off the main graph are 0.06% of the real network. They produce
-    // no edges, and must not produce a crash or a NaN either.
-    const split = graphOf([line([[0, 0], [1, 0]]), line([[500, 500], [501, 500]])]);
-    const virtual = simplifyNetwork(split, Float64Array.from([1, 2]), WIDE, 3, 'sum');
-    for (const value of virtual.values) expect(Number.isFinite(value)).toBe(true);
-  });
-
   it('leaves out what the viewport does not touch', () => {
     const graph = graphOf(chain);
     const near = { minX: -0.5, minY: -0.5, maxX: 1.5, maxY: 0.5 };
@@ -174,63 +166,6 @@ const chainForShape = [
   line([[1, 0], [2, 0]]),
   line([[2, 0], [3, 0]]),
 ];
-
-describe('maxHubSpacing', () => {
-  it('leaves exactly two hubs standing at that exact radius, never one and never several', () => {
-    // An irregular scatter, not a symmetric one -- a symmetric layout could
-    // pass this by accident (e.g. several points equidistant from the
-    // anchor, which is exactly the failure mode a rounded-down radius hits).
-    const scatter = graphOf([
-      line([[0, 0], [1, 0]]), line([[1, 0], [50, 5]]), line([[50, 5], [-20, 30]]),
-      line([[-20, 30], [8, -40]]), line([[8, -40], [3, 3]]),
-    ]);
-    const radius = maxHubSpacing(scatter, WIDE);
-    const virtual = simplifyNetwork(scatter, new Float64Array(scatter.linkCount).fill(1), WIDE, radius, 'sum');
-    // Exactly one virtual edge, joining exactly the two most extreme points.
-    expect(virtual.positions.length / 4).toBe(1);
-  });
-
-  it('excludes everything the instant the radius is pushed past it', () => {
-    // The whole reason this works unrounded: the exclusion test is a strict
-    // less-than, so the farthest point sits safely on the boundary at the
-    // exact radius but falls on the wrong side the moment it's exceeded.
-    const scatter = graphOf([
-      line([[0, 0], [1, 0]]), line([[1, 0], [50, 5]]), line([[50, 5], [-20, 30]]),
-      line([[-20, 30], [8, -40]]), line([[8, -40], [3, 3]]),
-    ]);
-    const radius = maxHubSpacing(scatter, WIDE);
-    const pastIt = simplifyNetwork(
-      scatter, new Float64Array(scatter.linkCount).fill(1), WIDE, radius * (1 + 1e-9), 'sum',
-    );
-    expect(pastIt.positions.length).toBe(0);
-  });
-
-  it('is not the diameter: a radius just under it still leaves more than one hub in general', () => {
-    // The point made in conversation, checked directly: the radius is
-    // measured from the anchor (nearest the centroid), not from the single
-    // farthest pair, so it can be smaller than the true diameter.
-    const line3 = graphOf([line([[0, 0], [100, 0]]), line([[100, 0], [100, 1]])]);
-    const trueDiameter = Math.hypot(100, 1); // (0,0) to (100,1), the farthest pair
-    expect(maxHubSpacing(line3, WIDE)).toBeLessThanOrEqual(trueDiameter);
-  });
-
-  it('shrinks to match a smaller viewport rather than the whole file', () => {
-    const graph = graphOf(chainForShape);
-    const whole = maxHubSpacing(graph, WIDE);
-    const near = maxHubSpacing(graph, { minX: -0.5, minY: -0.5, maxX: 1.5, maxY: 0.5 });
-    expect(near).toBeLessThan(whole);
-  });
-
-  it('is zero when nothing is visible', () => {
-    expect(maxHubSpacing(graphOf(chainForShape), { minX: 500, minY: 500, maxX: 501, maxY: 501 })).toBe(0);
-  });
-
-  it('is never rounded: the exact unrounded distance is the point, not an approximation of it', () => {
-    const graph = graphOf([line([[0, 0], [1, 0.5]])]);
-    const radius = maxHubSpacing(graph, WIDE);
-    expect(radius).toBe(Math.hypot(1, 0.5));
-  });
-});
 
 describe('thinFromCentroid', () => {
   const xs = [0, 1, 2, 3, 10];

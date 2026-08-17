@@ -9,19 +9,28 @@ import type { Table } from './tableMaker';
 // everywhere rather than a palette of unrelated categorical colors.
 export type ZoneSource = 'supply' | 'demand' | 'needs' | 'capacities';
 export type AgentKind = 'need' | 'capacity';
+export type NetworkSource = 'grade' | 'loads' | 'emissions';
+
+// A network dimension can be pinned to one value or aggregated across every
+// value it has -- vehicle counts and grams both sum cleanly across any of
+// time_interval, vehicle, resource, pollutant or source, so 'all' is always
+// a real, well-defined answer here, never a placeholder.
+export type Dim = string | 'all';
 
 export type MapSelection =
   | { mode: 'zones'; source: ZoneSource; resource: string }
   | { mode: 'desire_lines'; resource: string }
   | { mode: 'agents'; kind: AgentKind; resource: string }
   | { mode: 'network'; source: 'grade' }
-  | { mode: 'network'; source: 'loads'; timeInterval: string }
+  | { mode: 'network'; source: 'loads'; timeInterval: Dim; vehicle: Dim; resource: Dim }
   | {
       mode: 'network';
       source: 'emissions';
-      timeInterval: string;
-      pollutant: string;
-      emissionSource: string;
+      timeInterval: Dim;
+      vehicle: Dim;
+      resource: Dim;
+      pollutant: Dim;
+      emissionSource: Dim;
     };
 
 export type MapMode = MapSelection['mode'];
@@ -94,6 +103,18 @@ export function desireLineResources(tables: Tables): string[] {
   return stratumOptions(tables.desire_lines, 'resource');
 }
 
+// loads and emissions carry the same resource/vehicle columns, so both read
+// off whichever of the two files the current source names.
+export function networkResources(tables: Tables, source: 'loads' | 'emissions'): string[] {
+  const table = source === 'loads' ? tables.network_loads : tables.network_emissions;
+  return stratumOptions(table, 'resource');
+}
+
+export function networkVehicles(tables: Tables, source: 'loads' | 'emissions'): string[] {
+  const table = source === 'loads' ? tables.network_loads : tables.network_emissions;
+  return stratumOptions(table, 'vehicle');
+}
+
 // agents is wide on {resource}_capacity / {resource}_need, so the resource
 // list is a suffix strip over the value columns.
 export function agentResources(tables: Tables, kind: AgentKind): string[] {
@@ -102,6 +123,23 @@ export function agentResources(tables: Tables, kind: AgentKind): string[] {
     .map(c => c.name)
     .filter(name => name.endsWith(suffix))
     .map(name => name.slice(0, -suffix.length));
+}
+
+// The resource list every layer's global picker offers is the union across
+// whichever files are actually loaded -- a resource that only exists in one
+// file is still a real choice, it just leaves the other layers neutral.
+export function allResources(tables: Tables): string[] {
+  const seen = new Set<string>();
+  for (const r of zoneResources(tables, 'supply')) seen.add(r);
+  for (const r of zoneResources(tables, 'demand')) seen.add(r);
+  for (const r of zoneResources(tables, 'needs')) seen.add(r);
+  for (const r of zoneResources(tables, 'capacities')) seen.add(r);
+  for (const r of agentResources(tables, 'need')) seen.add(r);
+  for (const r of agentResources(tables, 'capacity')) seen.add(r);
+  for (const r of desireLineResources(tables)) seen.add(r);
+  for (const r of networkResources(tables, 'loads')) seen.add(r);
+  for (const r of networkResources(tables, 'emissions')) seen.add(r);
+  return [...seen];
 }
 
 // --- per-feature values, indexed by geometry row ---------------------------
@@ -149,6 +187,13 @@ function zoneTotals(tables: Tables, source: ZoneSource, resource: string): Map<s
   return totals;
 }
 
+// 'all' matches every row on that dimension rather than one specific value,
+// which is what lets a link's rows sum across it instead of being filtered
+// down to a single slice.
+function matches(value: string, dim: Dim): boolean {
+  return dim === 'all' || value === dim;
+}
+
 function linkTotals(tables: Tables, selection: Extract<MapSelection, { mode: 'network' }>): Map<string, number> | null {
   if (selection.source === 'grade') return null; // read straight off network itself
 
@@ -157,23 +202,28 @@ function linkTotals(tables: Tables, selection: Extract<MapSelection, { mode: 'ne
 
   const linkIds = stratumKeys(table, 'link_id');
   const intervals = stratumKeys(table, 'time_interval');
-  if (!linkIds || !intervals) return null;
+  const vehicles = stratumKeys(table, 'vehicle');
+  const resources = stratumKeys(table, 'resource');
+  if (!linkIds || !intervals || !vehicles || !resources) return null;
 
   const column = valueColumn(table, selection.source === 'loads' ? 'vehicle_count' : 'grams');
   if (!column) return null;
 
   // Emissions split further by pollutant and by exhaust / non-exhaust; both
-  // files also split by vehicle and direction, which are summed over rather
-  // than selected -- "per link per time period" means all traffic on it.
+  // files also split by direction, which is always summed over -- forward
+  // and backward traffic on a link are never separately selectable.
   const pollutants = selection.source === 'emissions' ? stratumKeys(table, 'pollutant') : null;
   const sources = selection.source === 'emissions' ? stratumKeys(table, 'source') : null;
 
   const totals = new Map<string, number>();
   for (let row = 0; row < table.rowCount; row++) {
-    if (intervals[row] !== selection.timeInterval || !column.present[row]) continue;
+    if (!column.present[row]) continue;
+    if (!matches(intervals[row], selection.timeInterval)) continue;
+    if (!matches(vehicles[row], selection.vehicle)) continue;
+    if (!matches(resources[row], selection.resource)) continue;
     if (selection.source === 'emissions') {
-      if (pollutants && pollutants[row] !== selection.pollutant) continue;
-      if (sources && sources[row] !== selection.emissionSource) continue;
+      if (pollutants && !matches(pollutants[row], selection.pollutant)) continue;
+      if (sources && !matches(sources[row], selection.emissionSource)) continue;
     }
     totals.set(linkIds[row], (totals.get(linkIds[row]) ?? 0) + column.data[row]);
   }
@@ -253,49 +303,81 @@ export function modeIsAvailable(tables: Tables, mode: MapMode): boolean {
   return !!tables.network;
 }
 
-// A selection under construction. The panel fills this in step by step and
-// only the complete forms color anything -- until then the map stays on its
-// hollow basemap, which is also what "leaving the legend" returns to.
+// --- the draft: one shared resource, four independently toggled layers -----
+//
+// There is no more single "active mode" -- every layer composites onto the
+// map at once, gated by its own on/off switch rather than by which one was
+// picked last. The resource is the one thing every layer shares; everything
+// else (which zone value, which network source, which time interval) is
+// each layer's own business.
 export type Draft = {
-  mode: MapMode | null;
+  // undefined: nothing chosen at all yet. 'all': the shared neutral/aggregate
+  // state. A specific string: a real resource every layer resolves against.
+  resource?: Dim;
+  active: Record<MapMode, boolean>;
   zoneSource?: ZoneSource;
   agentKind?: AgentKind;
-  networkSource?: 'grade' | 'loads' | 'emissions';
-  timeInterval?: string;
-  pollutant?: string;
-  emissionSource?: string;
-  resource?: string;
+  networkSource?: NetworkSource;
+  timeInterval?: Dim;
+  vehicle?: Dim;
+  pollutant?: Dim;
+  emissionSource?: Dim;
 };
 
-export function toSelection(draft: Draft): MapSelection | null {
-  if (draft.mode === 'zones') {
-    if (!draft.zoneSource || !draft.resource) return null;
-    return { mode: 'zones', source: draft.zoneSource, resource: draft.resource };
+export const DEFAULT_ACTIVE: Record<MapMode, boolean> = {
+  zones: true, agents: true, network: true, desire_lines: true,
+};
+
+// What one layer actually draws, resolved from the shared draft:
+//   off      -- toggled off, or its file isn't loaded
+//   neutral  -- on, but nothing to color: no resource, "all" resources, or
+//               (zones/agents only) the layer's own value kind isn't picked
+//   selected -- a real, complete selection ready for featureValues
+export type LayerRender =
+  | { kind: 'off' }
+  | { kind: 'neutral' }
+  | { kind: 'selected'; selection: MapSelection };
+
+export function zoneRender(draft: Draft, tables: Tables): LayerRender {
+  if (!draft.active.zones || !tables.zones) return { kind: 'off' };
+  if (!draft.resource || draft.resource === 'all' || !draft.zoneSource) return { kind: 'neutral' };
+  return { kind: 'selected', selection: { mode: 'zones', source: draft.zoneSource, resource: draft.resource } };
+}
+
+export function agentRender(draft: Draft, tables: Tables): LayerRender {
+  if (!draft.active.agents || !tables.agents) return { kind: 'off' };
+  if (!draft.resource || draft.resource === 'all' || !draft.agentKind) return { kind: 'neutral' };
+  return { kind: 'selected', selection: { mode: 'agents', kind: draft.agentKind, resource: draft.resource } };
+}
+
+export function desireLineRender(draft: Draft, tables: Tables): LayerRender {
+  if (!draft.active.desire_lines || !tables.desire_lines) return { kind: 'off' };
+  if (!draft.resource || draft.resource === 'all') return { kind: 'neutral' };
+  return { kind: 'selected', selection: { mode: 'desire_lines', resource: draft.resource } };
+}
+
+// Network never goes neutral once it has a source -- "all resources" is a
+// real aggregate for it, not an absence of one -- so an unset dimension
+// defaults straight to 'all' rather than blocking the selection the way a
+// missing zoneSource or agentKind does.
+export function networkRender(draft: Draft, tables: Tables): LayerRender {
+  if (!draft.active.network || !tables.network) return { kind: 'off' };
+  if (!draft.networkSource) return { kind: 'neutral' };
+  if (draft.networkSource === 'grade') return { kind: 'selected', selection: { mode: 'network', source: 'grade' } };
+
+  const timeInterval = draft.timeInterval ?? 'all';
+  const vehicle = draft.vehicle ?? 'all';
+  const resource = draft.resource ?? 'all';
+
+  if (draft.networkSource === 'loads') {
+    return { kind: 'selected', selection: { mode: 'network', source: 'loads', timeInterval, vehicle, resource } };
   }
-  if (draft.mode === 'desire_lines') {
-    if (!draft.resource) return null;
-    return { mode: 'desire_lines', resource: draft.resource };
-  }
-  if (draft.mode === 'agents') {
-    if (!draft.agentKind || !draft.resource) return null;
-    return { mode: 'agents', kind: draft.agentKind, resource: draft.resource };
-  }
-  if (draft.mode === 'network') {
-    if (draft.networkSource === 'grade') return { mode: 'network', source: 'grade' };
-    if (draft.networkSource === 'loads') {
-      if (!draft.timeInterval) return null;
-      return { mode: 'network', source: 'loads', timeInterval: draft.timeInterval };
-    }
-    if (draft.networkSource === 'emissions') {
-      if (!draft.timeInterval || !draft.pollutant || !draft.emissionSource) return null;
-      return {
-        mode: 'network',
-        source: 'emissions',
-        timeInterval: draft.timeInterval,
-        pollutant: draft.pollutant,
-        emissionSource: draft.emissionSource,
-      };
-    }
-  }
-  return null;
+  const pollutant = draft.pollutant ?? 'all';
+  const emissionSource = draft.emissionSource ?? 'all';
+  return {
+    kind: 'selected',
+    selection: {
+      mode: 'network', source: 'emissions', timeInterval, vehicle, resource, pollutant, emissionSource,
+    },
+  };
 }

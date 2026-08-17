@@ -34,6 +34,7 @@ export const NODES: DiagramNode[] = [
   { id: 'network', col: 3, order: 7 },
   { id: 'alternative_specific_constants', col: 3, order: 8 },
   { id: 'time_intervals', col: 3, order: 9 },
+  { id: 'consolidation_radii', col: 3, order: 10 },
   // col 4 -- network_loads centered, it carries the most edges
   { id: 'copert_v_coefficients', col: 4, order: 0 },
   { id: 'network_loads', col: 4, order: 1 },
@@ -67,6 +68,7 @@ export const EDGES: { from: TableName; to: TableName }[] = [
   { from: 'alternative_specific_constants', to: 'network_loads' },
   { from: 'network', to: 'network_loads' },
   { from: 'vehicles', to: 'network_loads' },
+  { from: 'consolidation_radii', to: 'network_loads' },
   { from: 'network_loads', to: 'network_emissions' },
   { from: 'network', to: 'network_emissions' },
   { from: 'vehicles', to: 'network_emissions' },
@@ -79,7 +81,7 @@ export function labelOf(id: TableName): string {
   return id.replace(/_/g, '-');
 }
 
-// Each node's fixed slot in the 28-gon (0..27) used for its card color.
+// Each node's fixed slot in the 29-gon (0..28) used for its card color.
 // Rotation of the whole n-gon changes which hue lands at slot 0, but never
 // the circular distance between any two slots -- verified directly against
 // miniature-waffle's own matchColors output, not assumed -- so this
@@ -98,42 +100,47 @@ export function labelOf(id: TableName): string {
 // next to it, with the vertical pull decaying with distance -- opposite
 // ends of a column may share a hue, immediate neighbours may not -- and
 // capped below the weakest edge (min edge weight is 4) so wiring stays the
-// dominant signal. Note the two goals genuinely fight: network_loads has 11
-// neighbours and 9 of them are stacked in column 3, so pushing them off the
+// dominant signal. Note the two goals genuinely fight: network_loads has 12
+// neighbours and 10 of them are stacked in column 3, so pushing them off the
 // hub crowds them onto each other. Column 3 is a compromise by necessity.
 //
-// Converged to the same penalty (42.2221) and the same derived statistics
-// in every one of several independent 60-restart runs, which is good
-// evidence this is the true optimum rather than a lucky local one. See
-// conversation/commit history for the solver -- not worth keeping in the
-// repo, this table is the only artifact that matters at runtime.
+// Re-solved for 29 nodes (added consolidation_radii) after landing at 28.
+// Best of 60 independent restarts converged to the same 44.9862 penalty
+// twice at different step counts, which is good evidence it's the true
+// optimum rather than a lucky local one -- the spread across restarts was
+// small (44.99 to 45.40) but not perfectly identical every time the way the
+// 28-node solve was, likely a difference in annealing schedule rather than
+// a different underlying optimum. See conversation history for the solver
+// -- not worth keeping in the repo, this table is the only artifact that
+// matters at runtime.
 export const POSITIONS: Record<TableName, number> = {
-  supply_effects: 7,
-  supply_thresholds: 14,
-  demand_effects: 0,
-  demand_thresholds: 5,
-  capacity_effects: 17,
-  capacity_thresholds: 25,
-  need_effects: 10,
-  need_thresholds: 3,
-  supply: 27,
-  demand: 19,
-  zones: 2,
-  capacities: 6,
-  needs: 23,
-  agents: 12,
-  desire_lines: 24,
-  departures: 16,
-  vehicles: 9,
-  dwell_times: 20,
-  vehicle_velocities: 13,
-  vehicle_capacities: 26,
-  road_capacities: 18,
-  network: 11,
-  alternative_specific_constants: 22,
-  time_intervals: 15,
-  copert_v_coefficients: 8,
-  network_loads: 4,
-  emission_factors: 1,
-  network_emissions: 21,
+  supply_effects: 25,
+  supply_thresholds: 3,
+  demand_effects: 20,
+  demand_thresholds: 12,
+  capacity_effects: 0,
+  capacity_thresholds: 23,
+  need_effects: 8,
+  need_thresholds: 17,
+  supply: 18,
+  demand: 27,
+  zones: 21,
+  capacities: 15,
+  needs: 24,
+  agents: 5,
+  desire_lines: 14,
+  departures: 7,
+  vehicles: 1,
+  dwell_times: 11,
+  vehicle_velocities: 4,
+  vehicle_capacities: 16,
+  road_capacities: 9,
+  network: 28,
+  alternative_specific_constants: 6,
+  time_intervals: 13,
+  consolidation_radii: 2,
+  copert_v_coefficients: 19,
+  network_loads: 22,
+  emission_factors: 26,
+  network_emissions: 10,
 };

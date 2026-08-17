@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ZERO_ORIGIN, boundsForMode, boundsOf, makePoints, makePolygons, makeSegments, originOf, rawBounds,
+  ZERO_ORIGIN, boundsOf, makePoints, makePolygons, makeSegments, originOf, rawBounds,
 } from '../src/lib/geometryMaker';
 import type { RawGeometry } from '../src/lib/rawTable';
 
@@ -177,7 +177,7 @@ describe('real projected coordinates', () => {
   });
 });
 
-describe('boundsForMode', () => {
+describe('boundsOf', () => {
   const geometries = {
     zones: makePolygons([square()], ZERO_ORIGIN),
     network: makeSegments([line([[100, 100], [200, 200]])], ZERO_ORIGIN),
@@ -185,25 +185,16 @@ describe('boundsForMode', () => {
     agents: makePoints([point(-50, -50)], ZERO_ORIGIN),
   };
 
-  it('frames only the layer the mode draws, not everything loaded', () => {
-    // The network reaches out to 200; framing zones against that would leave
-    // the unit square a speck in the corner.
-    expect(boundsForMode(geometries, 'zones')).toEqual({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
-    expect(boundsForMode(geometries, 'network')).toEqual({ minX: 100, minY: 100, maxX: 200, maxY: 200 });
-    expect(boundsForMode(geometries, 'agents')).toEqual({ minX: -50, minY: -50, maxX: -50, maxY: -50 });
+  it('spans every layer that carries geometry', () => {
+    expect(boundsOf(geometries)).toEqual({ minX: -50, minY: -50, maxX: 200, maxY: 200 });
   });
 
-  it('falls back to the zones basemap when no mode is chosen', () => {
-    expect(boundsForMode(geometries, null)).toEqual({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
-  });
-
-  it('falls back to the basemap when the mode has no geometry of its own', () => {
-    expect(boundsForMode({ ...geometries, network: null }, 'network'))
+  it('ignores the layers that are missing rather than treating them as zero', () => {
+    expect(boundsOf({ ...geometries, network: null, agents: null }))
       .toEqual({ minX: 0, minY: 0, maxX: 1, maxY: 1 });
   });
 
-  it('falls back to everything when there is no basemap either', () => {
-    const bounds = boundsForMode({ ...geometries, zones: null }, null);
-    expect(bounds).toEqual({ minX: -50, minY: -50, maxX: 200, maxY: 200 });
+  it('has nothing to frame when nothing is loaded', () => {
+    expect(boundsOf({ zones: null, network: null, desireLines: null, agents: null })).toBeNull();
   });
 });

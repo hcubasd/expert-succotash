@@ -11,6 +11,7 @@ export type TableName =
   | 'departures' | 'time_intervals' | 'dwell_times'
   | 'vehicle_velocities' | 'vehicle_capacities' | 'road_capacities'
   | 'alternative_specific_constants' | 'network' | 'vehicles'
+  | 'consolidation_radii'
   | 'network_loads' | 'copert_v_coefficients' | 'emission_factors'
   | 'network_emissions';
 
@@ -39,6 +40,7 @@ export const FILENAME: Record<TableName, string> = {
   alternative_specific_constants: 'alternative_specific_constants.csv',
   network: 'network.gpkg',
   vehicles: 'vehicles.csv',
+  consolidation_radii: 'consolidation_radii.csv',
   network_loads: 'network_loads.csv',
   copert_v_coefficients: 'copert_v_coefficients.csv',
   emission_factors: 'emission_factors.csv',
@@ -137,6 +139,11 @@ export function classifyColumns(table: TableName, headers: string[], isNumeric: 
     case 'alternative_specific_constants':
       return only(['vehicle', 'resource'], ['alternative_specific_constant']);
 
+    // A pipeline-internal tuning value, one per (vehicle, resource) pair --
+    // radius is the only real measurement, the pair keys the row.
+    case 'consolidation_radii':
+      return only(['vehicle', 'resource'], ['radius']);
+
     // vehicle_type is a category the emission tables join on; the BPR and
     // choice-model parameters are all sampled quantities.
     case 'vehicles':
@@ -147,10 +154,12 @@ export function classifyColumns(table: TableName, headers: string[], isNumeric: 
       return only(['link_id', 'road_type', 'oneway'], ['grade']);
 
     // forward is which direction the traffic went -- a category, not a
-    // magnitude.
+    // magnitude. resource is a stratum for the same reason time_interval and
+    // vehicle are: it keys which slice of demand a row belongs to, it
+    // doesn't measure anything itself.
     case 'network_loads':
       return only(
-        ['link_id', 'time_interval', 'vehicle', 'forward'],
+        ['link_id', 'time_interval', 'vehicle', 'forward', 'resource'],
         ['vehicle_count', 'velocity', 'load_pct'],
       );
 
@@ -163,10 +172,53 @@ export function classifyColumns(table: TableName, headers: string[], isNumeric: 
       return only(['vehicle_type', 'pollutant'], ['emission_factor']);
 
     // source (exhaust / non-exhaust) is a category, same status as forward.
+    // resource keys the row the same way it does in network_loads.
     case 'network_emissions':
       return only(
-        ['link_id', 'time_interval', 'vehicle', 'forward', 'pollutant', 'source'],
+        ['link_id', 'time_interval', 'vehicle', 'forward', 'pollutant', 'source', 'resource'],
         ['grams'],
       );
   }
 }
+
+// The columns a file actually has to carry to be this table at all -- for an
+// only() table, its whole fixed list (strata and values both); for an
+// except() table or one of the ad-hoc wide/long shapes above, just whatever
+// part of it is genuinely fixed rather than open-ended (agent_id/zone_id for
+// agents, zone_id alone for supply/demand, probability alone for
+// capacities/needs). classifyColumns only ever sees headers a file actually
+// has, so it has no way to say which of its own expectations went unmet --
+// this exists for exactly that check, at load time, before anything gets
+// silently dropped. Mirrors the switch above by hand rather than being
+// derived from it; keep the two in sync if urban-dollop's own schema moves.
+export const REQUIRED_COLUMNS: Record<TableName, string[]> = {
+  supply_effects: ['stratum', 'stratum_value'],
+  demand_effects: ['stratum', 'stratum_value'],
+  capacity_effects: ['stratum', 'stratum_value'],
+  need_effects: ['stratum', 'stratum_value'],
+  supply_thresholds: ['resource', 'resource_level', 'threshold'],
+  demand_thresholds: ['resource', 'resource_level', 'threshold'],
+  capacity_thresholds: ['resource', 'resource_level', 'threshold'],
+  need_thresholds: ['resource', 'resource_level', 'threshold'],
+  supply: ['zone_id'],
+  demand: ['zone_id'],
+  capacities: ['probability'],
+  needs: ['probability'],
+  zones: ['zone_id'],
+  agents: ['agent_id', 'zone_id'],
+  desire_lines: ['resource', 'origin_agent_id', 'destination_zone_id', 'quantity'],
+  departures: ['resource', 'time_interval', 'probability'],
+  time_intervals: ['time_interval', 'duration'],
+  dwell_times: ['resource', 'dwell_time', 'load_pct'],
+  vehicle_velocities: ['vehicle', 'road_type', 'velocity'],
+  vehicle_capacities: ['vehicle', 'resource', 'capacity'],
+  road_capacities: ['road_type', 'capacity'],
+  alternative_specific_constants: ['vehicle', 'resource', 'alternative_specific_constant'],
+  consolidation_radii: ['vehicle', 'resource', 'radius'],
+  vehicles: ['vehicle', 'vehicle_type'],
+  network: ['link_id', 'road_type', 'oneway', 'grade'],
+  network_loads: ['link_id', 'time_interval', 'vehicle', 'forward', 'resource', 'vehicle_count'],
+  copert_v_coefficients: ['vehicle_type', 'pollutant', 'gradient_bin', 'payload_bin'],
+  emission_factors: ['vehicle_type', 'pollutant', 'emission_factor'],
+  network_emissions: ['link_id', 'time_interval', 'vehicle', 'forward', 'pollutant', 'source', 'resource', 'grams'],
+};

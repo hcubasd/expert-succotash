@@ -105,6 +105,12 @@ type Props = { legend: Legend };
 // shared font against nine stacked numbers. They inherit the font size the
 // panel already settled on instead, which is what keeps them the same size
 // as every other label on screen without participating in the fit.
+// The gap kept between the top/bottom tick labels and the bar's own edges.
+// Only the labels move in by this -- the painted bar still runs the full
+// height behind them, uninterrupted, since a tick's exact pixel row was
+// never meant to line up with its value's exact band in the first place.
+const EDGE_PAD_EM = 1;
+
 export default function LegendCanvas({ legend }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -136,10 +142,11 @@ export default function LegendCanvas({ legend }: Props) {
             position: 'absolute',
             left: 0,
             right: 0,
-            // The track runs from 0 to (height - one label), so the label's
-            // own box always lands fully inside the bar: at t=0 it sits on
-            // the floor, at t=1 its top edge meets the ceiling.
-            bottom: `calc(${t} * (100% - ${LABEL_EM}em))`,
+            // The track runs from EDGE_PAD_EM to (height - one label -
+            // EDGE_PAD_EM), so the label's own box lands inside the bar with
+            // room to spare at either end: at t=0 it sits just above the
+            // floor, at t=1 its top edge sits just below the ceiling.
+            bottom: `calc(${t} * (100% - ${LABEL_EM}em - ${2 * EDGE_PAD_EM}em) + ${EDGE_PAD_EM}em)`,
             height: `${LABEL_EM}em`,
             lineHeight: `${LABEL_EM}em`,
             textAlign: 'center',

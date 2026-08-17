@@ -1,4 +1,5 @@
 import { grayAt, rgbStr } from '../lib/colors';
+import { humanize } from '../lib/humanize';
 import type { Legend } from '../lib/mapScene';
 import {
   agentRender, agentResources, allResources, desireLineRender,
@@ -31,10 +32,10 @@ const LAYERS: { mode: MapMode; label: string }[] = [
 // then time interval, vehicle, pollutant and source.
 const CARD_SLOTS = 5;
 
-const optionsOf = (values: string[]): Option[] => values.map(v => ({ value: v, label: v }));
+const optionsOf = (values: string[]): Option[] => values.map(v => ({ value: v, label: humanize(v) }));
 const slider = grayAt(0.5);
 
-type Card = { options: Option[]; selected: string | undefined; label: string };
+type Card = { options: Option[]; selected: string | undefined };
 
 function padSlots(cards: Card[]): (Card | null)[] {
   const out: (Card | null)[] = [...cards];
@@ -42,20 +43,30 @@ function padSlots(cards: Card[]): (Card | null)[] {
   return out;
 }
 
-// What a card reads as once something is picked: the option's own label, not
-// the raw value behind it -- the network source card should say "vehicle
-// count", never "loads". Falls back to the card's own name as a placeholder
-// while nothing is selected.
+// What a card reads as: the selected option's own label, or -- while nothing
+// is picked yet -- a preview of the first option instead of the field's own
+// generic name (a card just reading "value" was the actual complaint this
+// replaced). Only meaningful once there's at least one real option; an empty
+// card is shown blank by the `empty` prop regardless of what this returns.
+function shownOption(card: Card): Option | undefined {
+  return card.options.find(option => option.value === card.selected) ?? card.options[0];
+}
 function labelOf(card: Card): string {
-  return card.options.find(option => option.value === card.selected)?.label ?? card.label;
+  return shownOption(card)?.label ?? '';
+}
+// The value behind whatever labelOf is showing -- passed on as Dropdown's
+// own `selected`, so the popup bolds the previewed first option too, not
+// only a value the user actually clicked.
+function shownValue(card: Card): string | undefined {
+  return shownOption(card)?.value;
 }
 
-// Grayed when there's nothing chosen yet, or when what *is* chosen has no
-// data behind it -- the same signal the map gives by leaving that layer
-// uncoloured, said again where the choice was made.
+// Grayed when the option being shown -- selected, or previewed as the first
+// one -- has no data behind it. Same signal the map gives by leaving that
+// layer uncoloured, said again where the choice is made.
 function isGrayed(card: Card): boolean {
-  const current = card.options.find(option => option.value === card.selected);
-  return !current || !!current.unavailable;
+  const shown = shownOption(card);
+  return !shown || !!shown.unavailable;
 }
 
 export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, detail, onDetail }: Props) {
@@ -69,27 +80,27 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
   const zoneCards: Card[] = [
     {
       options: (['supply', 'demand', 'needs', 'capacities'] as const).map(source => ({
-        value: source, label: source, unavailable: !tables[source],
+        value: source, label: humanize(source), unavailable: !tables[source],
       })),
       selected: draft.zoneSource,
-      label: 'value',
     },
   ];
 
-  // --- agents: one card, no All -- same reasoning as zones. Availability
-  // here is per resource rather than per file: agents.gpkg carries a
-  // {resource}_need / {resource}_capacity column only for the resources it
-  // actually has.
+  // --- agents: one card, no All -- same reasoning as zones, but availability
+  // is two separate checks rather than one: the file has to be loaded at
+  // all (agents.gpkg, same as zones' per-file check), and once a resource is
+  // picked, that resource has to actually have a {resource}_need /
+  // {resource}_capacity column -- agents.gpkg carries one only for the
+  // resources it actually has.
   const agentCards: Card[] = [
     {
       options: (['need', 'capacity'] as const).map(kind => ({
         value: kind,
-        label: kind,
-        unavailable: !!draft.resource && draft.resource !== 'all'
-          && !agentResources(tables, kind).includes(draft.resource),
+        label: humanize(kind),
+        unavailable: !tables.agents || (!!draft.resource && draft.resource !== 'all'
+          && !agentResources(tables, kind).includes(draft.resource)),
       })),
       selected: draft.agentKind,
-      label: 'value',
     },
   ];
 
@@ -101,16 +112,16 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
   const hasLoads = !!tables.network_loads;
   const hasEmissions = !!tables.network_emissions;
   const networkSourceOptions: Option[] = [
-    ...(hasLoads ? [{ value: 'loads', label: 'vehicle count' }] : []),
-    ...(hasEmissions ? [{ value: 'emissions', label: 'emissions' }] : []),
-    ...(!hasLoads && !hasEmissions && tables.network ? [{ value: 'grade', label: 'grade' }] : []),
+    ...(hasLoads ? [{ value: 'loads', label: 'Vehicle count' }] : []),
+    ...(hasEmissions ? [{ value: 'emissions', label: 'Emissions' }] : []),
+    ...(!hasLoads && !hasEmissions && tables.network ? [{ value: 'grade', label: 'Grade' }] : []),
   ];
   const netSource = draft.networkSource;
   const netTakesDimensions = netSource === 'loads' || netSource === 'emissions';
   const netFileSource = netSource === 'emissions' ? 'emissions' : 'loads';
 
   const networkCards: Card[] = [
-    { options: networkSourceOptions, selected: netSource, label: 'value' },
+    { options: networkSourceOptions, selected: netSource },
     {
       options: netTakesDimensions
         ? [ALL, ...optionsOf(stratumOptions(
@@ -118,26 +129,22 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
           ))]
         : [],
       selected: draft.timeInterval,
-      label: 'time interval',
     },
     {
       options: netTakesDimensions ? [ALL, ...optionsOf(networkVehicles(tables, netFileSource))] : [],
       selected: draft.vehicle,
-      label: 'vehicle',
     },
     {
       options: netSource === 'emissions'
         ? [ALL, ...optionsOf(stratumOptions(tables.network_emissions, 'pollutant'))]
         : [],
       selected: draft.pollutant,
-      label: 'pollutant',
     },
     {
       options: netSource === 'emissions'
         ? [ALL, ...optionsOf(stratumOptions(tables.network_emissions, 'source'))]
         : [],
       selected: draft.emissionSource,
-      label: 'source',
     },
   ];
 
@@ -178,14 +185,18 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
     onDraft({ ...draft, active: { ...draft.active, [mode]: !draft.active[mode] } });
   }
 
+  const resourceCard: Card = { options: resourceOptions, selected: draft.resource };
+
   return (
     <div className="bg" style={{ flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
       <Dropdown
         options={resourceOptions}
-        selected={draft.resource}
-        label={labelOf({ options: resourceOptions, selected: draft.resource, label: 'resource' })}
-        grayed={!draft.resource}
+        selected={shownValue(resourceCard)}
+        label={labelOf(resourceCard)}
+        empty={allResources(tables).length === 0}
+        grayed={isGrayed(resourceCard)}
         onSelect={resource => onDraft({ ...draft, resource })}
+        style={{ padding: '1em 0' }}
       />
 
       <div className="bg" style={{ flex: 1, minHeight: 0 }}>
@@ -201,21 +212,22 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
                   layout completely alone. */}
               <div
                 className="bg"
-                style={{ cursor: available ? 'pointer' : 'default' }}
+                style={{ cursor: available ? 'pointer' : 'default', padding: '1em 0' }}
                 onClick={available ? () => toggleLayer(mode) : undefined}
               >
-                <div className="fg" style={{ color: on ? undefined : INACTIVE }}>{label}</div>
+                <div className="fg" style={{ color: on ? undefined : INACTIVE }}>{humanize(label)}</div>
               </div>
 
               {padSlots(cardsFor[mode]).map((card, slot) => (
                 <Dropdown
                   key={slot}
                   options={card?.options ?? []}
-                  selected={card?.selected}
+                  selected={card ? shownValue(card) : undefined}
                   label={card ? labelOf(card) : ''}
                   empty={!card || card.options.length === 0}
                   grayed={!on || !card || isGrayed(card)}
                   onSelect={value => select(mode, slot, value)}
+                  style={{ padding: '1em 0' }}
                 />
               ))}
 

@@ -49,9 +49,9 @@ describe('makeTable', () => {
   it('keeps identifiers as strata even though they are numeric', () => {
     const t = table(
       'desire_lines',
-      'resource,quantity,origin_agent_id,destination_zone_id\nparcels,2,1,7\n',
+      'resource,quantity,origin_agent_id\nparcels,2,1\n',
     );
-    expect(t.strata.map(c => c.name)).toEqual(['resource', 'origin_agent_id', 'destination_zone_id']);
+    expect(t.strata.map(c => c.name)).toEqual(['resource', 'origin_agent_id']);
     expect(t.values.map(c => c.name)).toEqual(['quantity']);
   });
 

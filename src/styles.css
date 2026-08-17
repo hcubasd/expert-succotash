@@ -81,3 +81,21 @@ body {
 .word-btn:hover {
   opacity: 0.6;
 }
+
+/* The dropdown popup's own list: nothing else in this UI shows a native
+   scrollbar, so the unstyled default -- its own track and border -- read as
+   a stray line rather than a scrollbar. Thumb-only, no track, no border,
+   the same gray Dropdown.tsx already uses for "muted". */
+.dropdown-list::-webkit-scrollbar {
+  width: 6px;
+}
+.dropdown-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+.dropdown-list::-webkit-scrollbar-thumb {
+  background: rgb(128, 128, 128);
+}
+.dropdown-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(128, 128, 128) transparent;
+}

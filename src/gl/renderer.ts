@@ -293,8 +293,13 @@ export class MapRenderer {
     gl.bindVertexArray(this.pointsVao);
     gl.useProgram(this.points);
     this.setTransform(this.points, view);
-    const fillRadius = radiusCssPx * pixelRatio;
-    const outerRadius = fillRadius + borderCssPx * pixelRatio;
+    // radiusCssPx is the spacing the point-collapse thinning already solved
+    // for -- neighbours were kept apart by exactly this much so fills alone
+    // would touch, never overlap. The border has to be carved out of that
+    // same footprint, not added on top of it, or every pair of points that
+    // thinning placed edge-to-edge now overlaps by twice the border width.
+    const outerRadius = radiusCssPx * pixelRatio;
+    const fillRadius = Math.max(0, outerRadius - borderCssPx * pixelRatio);
     gl.uniform2f(
       gl.getUniformLocation(this.points, 'u_pixelRadius'),
       (outerRadius * 2) / width,

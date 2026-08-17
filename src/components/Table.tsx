@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { colorBg, squeezeFg } from 'psychic-potato';
 import { LUMINANCE, gradientAt, indexColor, ngon, rgbStr, semicircle } from '../lib/colors';
 import { equalize } from '../lib/equalize';
+import { humanize } from '../lib/humanize';
 import { stratumText, valueText } from '../lib/tableMaker';
 import type { StratumColumn, Table as TableData, ValueColumn } from '../lib/tableMaker';
 import Dropdown from './Dropdown';
@@ -42,14 +43,6 @@ const PAGE = 100;
 const MIN_DRAG_PX = 4;
 
 const ALL: Option = { value: 'all', label: 'All' };
-
-// Table titles and headers both get this: drop underscores, capitalize only
-// the first letter of the first word. Deliberately not diagramLayout's
-// labelOf, which hyphenates for the diagram's own cards and isn't changing.
-function humanize(name: string): string {
-  const spaced = name.replace(/_/g, ' ');
-  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
-}
 
 type Cell = { text: string; fill?: string; onClick?: () => void; italic?: boolean };
 
@@ -114,7 +107,24 @@ function useColumnDrag(columnName: string, onReorder: (from: string, to: string)
   const state = useRef<{ x0: number; y0: number; dragging: boolean } | null>(null);
 
   const onPointerDown = (event: React.PointerEvent) => {
+    // A React portal is a child of its host in the *React* tree even though
+    // it lives at document.body in the DOM, so an open dropdown's popup
+    // bubbles its events straight into this header's handlers. Capturing on
+    // one of those would pin the pointer to the header and hand the
+    // following click to it instead of to the option the user pressed --
+    // which is to say, the dropdown would stop selecting anything at all.
+    // A DOM containment check is exactly the line the React tree blurs.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     state.current = { x0: event.clientX, y0: event.clientY, dragging: false };
+    // Without this, dragging past this cell's own edge hands pointermove
+    // and pointerup to whatever element the cursor is now over instead --
+    // so releasing over the drop target fires *its* onPointerUp, which has
+    // no drag state of its own and does nothing, while this cell's own
+    // onPointerUp (holding the state the reorder actually needs) never
+    // fires at all. Capturing keeps every event routed back here regardless
+    // of where the pointer physically ends up; elementFromPoint in
+    // onPointerUp still finds the real drop target underneath it.
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
   const onPointerMove = (event: React.PointerEvent) => {
     const s = state.current;
@@ -452,7 +462,22 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
     // wide column, which at a few columns looks like a headline, not a table.
     // The bound is the raw body font -- 0.98 is breathing room for a fitted
     // size, not something to shave off the default.
-    const target = Math.min(fitted, parseFloat(getComputedStyle(document.body).fontSize));
+    //
+    // Floored to a whole pixel, and that is load-bearing, not tidiness. Every
+    // cell's padding is 1em, so a fractional root font size makes the padding
+    // fractional too -- and squeezeFg tests the fit by comparing
+    // getComputedStyle's rounded padding string against getBoundingClientRect's
+    // own subpixel grid. A cell hugs its text, so that comparison lands at
+    // exactly zero, and those two number sources disagreeing by a hair put it
+    // a hair *below* zero instead. Every font in the sweep then reads as
+    // overflowing, the bracket never flips, squeezeFg throws, and the catch
+    // above drops the refit on the floor. Only the very first fit survived
+    // that, because until it ran the root was still on body's whole-pixel
+    // size -- which is exactly why remounting the table looked fixed and
+    // resizing it did nothing. A whole pixel keeps 1em integral and the
+    // arithmetic exact.
+    const bodySize = parseFloat(getComputedStyle(document.body).fontSize);
+    const target = Math.max(1, Math.floor(Math.min(fitted, bodySize)));
     // One size on the root, inherited by every cell, rather than written
     // onto each .fg in turn: that is what lets an appended block come out at
     // the right size having measured nothing, so paging never refits. The
@@ -477,6 +502,12 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
     observer.observe(root);
     return () => observer.disconnect();
   }, [fitFont, table, strataOrder, valuesOrder]);
+
+  // Same confirm Diagram's own Clear carries, worded for one file instead of
+  // every loaded one.
+  function handleClear() {
+    if (window.confirm(`Clear ${humanize(table.name)}? This cannot be undone.`)) onClear();
+  }
 
   function handleScroll() {
     const body = bodyRef.current;
@@ -519,7 +550,7 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
       </div>
 
       <button className="word-btn" style={{ bottom: '1em', left: '1em' }} onClick={onBack}>Diagram</button>
-      <button className="word-btn" style={{ bottom: '1em', right: '1em' }} onClick={onClear}>Clear</button>
+      <button className="word-btn" style={{ bottom: '1em', right: '1em' }} onClick={handleClear}>Clear</button>
     </div>
   );
 }

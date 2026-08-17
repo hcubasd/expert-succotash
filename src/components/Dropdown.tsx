@@ -48,6 +48,10 @@ type Anchor =
 // of distinct values -- so the list mounts a window and grows it as you
 // reach the end, the same way the table body itself pages.
 const PAGE = 100;
+// The list scrolls past this many rows rather than growing taller -- an
+// exact multiple of one cell's own height plus its gaps, not a viewport
+// fraction, so the box never stops mid-cell.
+const VISIBLE_CELLS = 8;
 // Cells never squash below the table's own row height, whatever the
 // inherited font size works out to.
 const CELL_H = 20;
@@ -58,10 +62,21 @@ export default function Dropdown({
 }: Props) {
   const [anchor, setAnchor] = useState<Anchor | null>(null);
   const [shown, setShown] = useState(PAGE);
+  const [maxListHeight, setMaxListHeight] = useState<number | null>(null);
   const triggerRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const open = anchor !== null;
+
+  // Every cell is the same height, so one of them measured is enough to cap
+  // the list at exactly VISIBLE_CELLS rows -- the gaps between them are the
+  // list's own `gap: 1`, one fewer than the cell count.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const first = listRef.current?.firstElementChild as HTMLElement | null;
+    if (!first) return;
+    setMaxListHeight(first.getBoundingClientRect().height * VISIBLE_CELLS + (VISIBLE_CELLS - 1));
+  }, [open, anchor]);
 
   function openDropdown() {
     const trigger = triggerRef.current;
@@ -155,13 +170,14 @@ export default function Dropdown({
       {anchor && createPortal(
         <div
           ref={listRef}
+          className="dropdown-list"
           onScroll={onListScroll}
           style={{
             position: 'fixed',
             top: anchor.top,
             ...(anchor.side === 'left' ? { left: anchor.left } : { right: anchor.right }),
             minWidth: anchor.minWidth,
-            maxHeight: '40vh',
+            maxHeight: maxListHeight ?? undefined,
             overflowY: 'auto',
             zIndex: 1000,
             // Its own black ground showing through 1px gaps between cells,
@@ -185,10 +201,9 @@ export default function Dropdown({
                 setAnchor(null);
               }}
               style={{
-                minHeight: CELL_H,
                 display: 'flex',
                 alignItems: 'center',
-                padding: '0 0.4em',
+                padding: '1em 0.4em',
                 whiteSpace: 'nowrap',
                 cursor: 'pointer',
                 background: option.color ?? '#fff',

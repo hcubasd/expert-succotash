@@ -119,10 +119,12 @@ export function classifyColumns(table: TableName, headers: string[], isNumeric: 
         values: headers.filter(h => h !== 'agent_id' && h !== 'zone_id' && isNumeric(h)),
       };
 
-    // quantity is the transacted amount; the two id columns identify the
-    // endpoints, so they key the row rather than measuring anything.
+    // quantity is the transacted amount; origin_agent_id identifies the
+    // depot end, and keys the row rather than measuring anything. The
+    // consumer end has no id column of its own -- it's a synthesized pair,
+    // not a zone -- it only ever shows up as the line geometry's other point.
     case 'desire_lines':
-      return only(['resource', 'origin_agent_id', 'destination_zone_id'], ['quantity']);
+      return only(['resource', 'origin_agent_id'], ['quantity']);
 
     case 'departures':
       return only(['resource', 'time_interval'], ['probability']);
@@ -206,7 +208,7 @@ export const REQUIRED_COLUMNS: Record<TableName, string[]> = {
   needs: ['probability'],
   zones: ['zone_id'],
   agents: ['agent_id', 'zone_id'],
-  desire_lines: ['resource', 'origin_agent_id', 'destination_zone_id', 'quantity'],
+  desire_lines: ['resource', 'origin_agent_id', 'quantity'],
   departures: ['resource', 'time_interval', 'probability'],
   time_intervals: ['time_interval', 'duration'],
   dwell_times: ['resource', 'dwell_time', 'load_pct'],

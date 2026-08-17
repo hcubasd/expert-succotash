@@ -141,7 +141,23 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
       try {
         const fitted = squeezeFg(root, 0.98);
         const bodySize = parseFloat(getComputedStyle(document.body).fontSize);
-        root.style.fontSize = `${Math.min(fitted, bodySize)}px`;
+        // Whole pixels only -- the panel's cells carry 1em padding, and a
+        // fractional root font size makes squeezeFg's next fit throw against
+        // its own subpixel rounding. See the long note in Table.tsx's
+        // fitFont: same padding, same failure, same fix.
+        const capped = Math.max(1, Math.floor(Math.min(fitted, bodySize)));
+        root.style.fontSize = `${capped}px`;
+        // squeezeFg writes its result as an inline style directly on every
+        // fg it measured, which wins over the inherited size above -- so
+        // the cap has to be reapplied to those same elements, not just to
+        // root, or a wide panel with short labels keeps growing past body
+        // size regardless of what root itself is set to.
+        if (fitted > bodySize) {
+          for (const bg of root.querySelectorAll<HTMLElement>('.bg')) {
+            const fg = bg.querySelector<HTMLElement>(':scope > .fg');
+            if (fg) fg.style.fontSize = `${capped}px`;
+          }
+        }
       } catch {
         // nothing measurable yet
       }
@@ -249,6 +265,17 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
     setViewVersion(v => v + 1);
   }, [history]);
 
+  // Zooms all the way back out to everything loaded, the same fit the view
+  // starts at. Pushes onto the same history stack a drag-zoom does, so Back
+  // still undoes it one step at a time rather than the reset being a
+  // separate, un-undoable jump.
+  const resetView = useCallback(() => {
+    const previous = viewRef.current;
+    viewRef.current = fitView(boundsOf(geometries), size.width, size.height);
+    setHistory(h => [...h, previous]);
+    setViewVersion(v => v + 1);
+  }, [geometries, size.width, size.height]);
+
   return (
     // The whole view is the colorBg root, so the 1px gap between canvas and
     // panel falls out of .bg's own gap rule rather than being drawn -- the
@@ -314,6 +341,10 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
 
         <button className="word-btn" style={{ position: 'absolute', bottom: '1em', right: '1em' }} onClick={onDiagram}>
           Diagram
+        </button>
+
+        <button className="word-btn" style={{ position: 'absolute', top: '1em', right: '1em' }} onClick={resetView}>
+          Reset
         </button>
       </div>
 

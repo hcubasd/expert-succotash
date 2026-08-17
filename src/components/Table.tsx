@@ -290,9 +290,27 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
   // Every leaf cell, header or body, gets this exact width -- filling the
   // available room when there's plenty, floored at MIN_COL_WIDTH once there
   // isn't, past which the table scrolls instead of squeezing further.
+  //
+  // The gaps are part of the width, not a rounding detail. Every row is a
+  // .bg, and styles.css gives .bg a 1px gap, so each stratum level costs
+  // columnWidth + 1 (its cell, plus the gap to the wrapper holding the
+  // rest) and the values row at the bottom costs V*columnWidth + (V-1).
+  // That sums to exactly totalColumns-1 pixels of gap across the whole
+  // table, which tableWidth used to leave out entirely -- and since the
+  // body clips at overflowX: hidden while the header doesn't clip at all,
+  // the shortfall only ever showed up as the body's last column being cut
+  // narrower than its own header.
+  //
+  // columnWidth takes the gaps out of the available room before dividing,
+  // and is floored to a whole pixel so totalColumns * columnWidth stays
+  // exact integer arithmetic rather than a float the browser's own layout
+  // summation might not reproduce.
   const totalColumns = strata.length + values.length;
-  const columnWidth = totalColumns > 0 ? Math.max(MIN_COL_WIDTH, wrapperWidth / totalColumns) : MIN_COL_WIDTH;
-  const tableWidth = totalColumns * columnWidth;
+  const totalGaps = Math.max(0, totalColumns - 1);
+  const columnWidth = totalColumns > 0
+    ? Math.max(MIN_COL_WIDTH, Math.floor((wrapperWidth - totalGaps) / totalColumns))
+    : MIN_COL_WIDTH;
+  const tableWidth = totalColumns * columnWidth + totalGaps;
 
   function toggleFilter(column: StratumColumn, code: number) {
     setFilters(previous => {

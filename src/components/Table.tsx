@@ -21,8 +21,8 @@ type Props = {
 };
 
 // Past this, columns stop shrinking and the table scrolls horizontally rather
-// than squeezing text into slivers. Excel's own default.
-const MIN_COL_WIDTH = 64;
+// than squeezing text into slivers.
+const MIN_COL_WIDTH = 256;
 // No row height is fixed any more: every cell gets 1em top/bottom padding,
 // and the column width is what actually drives font size through squeezeFg
 // -- height just hugs whatever that settles on. Without a fixed pixel to
@@ -46,9 +46,9 @@ const ALL: Option = { value: 'all', label: 'All' };
 
 type Cell = { text: string; fill?: string; onClick?: () => void; italic?: boolean };
 
-function CellBox({ cell, flex, dragProps, stickyTop }: {
+function CellBox({ cell, width, dragProps, stickyTop }: {
   cell: Cell;
-  flex: number;
+  width: number;
   dragProps?: Pick<
     React.HTMLAttributes<HTMLDivElement>,
     'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onClickCapture'
@@ -67,12 +67,24 @@ function CellBox({ cell, flex, dragProps, stickyTop }: {
   // padding the sides too would just be one more thing eating into the
   // budget that fit is measured against, for no benefit -- the row's
   // height, not its width, is what this padding is actually shaping.
+  //
+  // A fixed pixel width, not a flex share: every leaf cell in the table --
+  // header or body, whatever stratum depth it sits at -- takes the exact
+  // same columnWidth computed once in Table itself. Proportional flex
+  // shares (flex:1 against a sibling wrapper's flex:(remaining-1)) used to
+  // do this instead, cascaded down through however many nested wrapper
+  // levels separated a cell from the row that set minTableWidth -- header
+  // and body are separate flex layouts computing that cascade independently,
+  // free to round a fraction of a pixel differently at every level, which
+  // is exactly what surfaced as the last column's width drifting from its
+  // header. A shared, precomputed width can't drift: there's nothing left
+  // for either side to compute on its own.
   return (
     <div
       className="bg"
       data-fill={cell.fill}
       style={{
-        flex, cursor: cell.onClick ? 'pointer' : undefined, minWidth: 0,
+        flex: '0 0 auto', width, cursor: cell.onClick ? 'pointer' : undefined,
         fontStyle: cell.italic ? 'italic' : undefined,
         padding: '1em 0',
       }}
@@ -155,6 +167,7 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
   const rootRef = useRef<HTMLDivElement>(null);
   const headerRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
 
   // Ordering and filtering are how this table is being looked at right now,
   // not facts about the data -- so they live here and vanish on unmount,
@@ -163,6 +176,12 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
   const [valuesOrder, setValuesOrder] = useState<string[]>(() => table.values.map(c => c.name));
   const [filters, setFilters] = useState<Record<string, number>>({});
   const [limit, setLimit] = useState(PAGE);
+  // The scroll wrapper's own clientWidth: how much room columns actually
+  // have to fill before horizontal scrolling has to take over. 0 until the
+  // first measurement lands, which only ever shows up as one extra
+  // layout-effect pass before paint -- the same pattern the map's own
+  // measured sizing uses.
+  const [wrapperWidth, setWrapperWidth] = useState(0);
 
   const lit = activeColumn && activeColumn.table === table.name ? activeColumn.column : null;
 
@@ -268,7 +287,12 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
     (anyFilterActive ? stratumPaletteOf.get(column.name)?.(code) : undefined);
   const valueFill = (column: ValueColumn, row: number) => (lit === column.name ? valuePaint?.ofRow(row) : undefined);
 
-  const minTableWidth = (strata.length + values.length) * MIN_COL_WIDTH;
+  // Every leaf cell, header or body, gets this exact width -- filling the
+  // available room when there's plenty, floored at MIN_COL_WIDTH once there
+  // isn't, past which the table scrolls instead of squeezing further.
+  const totalColumns = strata.length + values.length;
+  const columnWidth = totalColumns > 0 ? Math.max(MIN_COL_WIDTH, wrapperWidth / totalColumns) : MIN_COL_WIDTH;
+  const tableWidth = totalColumns * columnWidth;
 
   function toggleFilter(column: StratumColumn, code: number) {
     setFilters(previous => {
@@ -313,12 +337,11 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
   // carry the ref and the width the body shares; wrapping it instead would
   // cost a .bg level and push every header cell a depth deeper than it is.
   function renderHeader(remainingStrata: StratumColumn[], outer = false): React.ReactNode {
-    const remaining = remainingStrata.length + values.length;
     const rowRef = outer ? headerRef : undefined;
     const rowStyle: React.CSSProperties = {
       flexDirection: 'row',
       flexShrink: 0,
-      ...(outer ? { minWidth: minTableWidth } : null),
+      ...(outer ? { minWidth: tableWidth } : null),
     };
 
     if (remainingStrata.length === 0) {
@@ -329,6 +352,7 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
             <DraggableValueHeaderCell
               key={column.name}
               column={column}
+              columnWidth={columnWidth}
               onSelect={() => onSelectColumn(column.name)}
               onReorder={reorderColumns}
             />
@@ -342,12 +366,17 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
       <div ref={rowRef} className="bg" style={rowStyle}>
         <ReorderableStratumHeader
           column={first}
+          columnWidth={columnWidth}
           options={stratumOptionsOf.get(first.name) ?? [ALL]}
           selected={filtered !== undefined ? String(filtered) : 'all'}
           onSelect={value => setFilterFromDropdown(first, value)}
           onReorder={reorderColumns}
         />
-        <div className="bg" style={{ flexDirection: 'column', flex: remaining - 1, minWidth: 0 }}>
+        {/* No flex share, no minWidth floor -- this wrapper's own width is
+            just whatever its content (the recursive row inside it) needs,
+            which is exactly totalColumns-1 leaf cells' worth now that every
+            leaf carries its own fixed width. */}
+        <div className="bg" style={{ flexDirection: 'column', flexShrink: 0 }}>
           {renderHeader(rest)}
         </div>
       </div>
@@ -359,7 +388,6 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
   // Reordering strata changes only the shape of this tree -- a row's own
   // values never change, they just land somewhere else vertically.
   function renderBody(rowIndices: number[], remainingStrata: StratumColumn[]): React.ReactNode {
-    const remaining = remainingStrata.length + values.length;
     if (remainingStrata.length === 0) {
       if (values.length === 0) return null;
       return (
@@ -367,7 +395,11 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
           {rowIndices.map(row => (
             <div key={row} className="bg" style={{ flexDirection: 'row', flexShrink: 0 }}>
               {values.map(column => (
-                <CellBox key={column.name} flex={1} cell={{ text: valueText(column, row), fill: valueFill(column, row) }} />
+                <CellBox
+                  key={column.name}
+                  width={columnWidth}
+                  cell={{ text: valueText(column, row), fill: valueFill(column, row) }}
+                />
               ))}
             </div>
           ))}
@@ -412,7 +444,7 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
                 off the top of the scrolled body keeps its label in view the
                 whole time you're still inside it. */}
             <CellBox
-              flex={1}
+              width={columnWidth}
               stickyTop="1em"
               cell={{
                 text: stratumText(first, group.rows[0]),
@@ -420,7 +452,10 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
                 onClick: () => toggleFilter(first, group.code),
               }}
             />
-            <div className="bg" style={{ flexDirection: 'column', flex: remaining - 1, minWidth: 0 }}>
+            {/* No flex share, no minWidth floor -- same reasoning as the
+                header's own "rest" wrapper: sized by its content now that
+                every leaf below it carries its own fixed width. */}
+            <div className="bg" style={{ flexDirection: 'column', flexShrink: 0 }}>
               {renderBody(group.rows, rest)}
             </div>
           </div>
@@ -503,6 +538,20 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
     return () => observer.disconnect();
   }, [fitFont, table, strataOrder, valuesOrder]);
 
+  // clientWidth, not the wrapper's own offset/outer width: for a scrolling
+  // container that's the visible viewport size, excluding whatever's
+  // currently scrolled off -- exactly the room columnWidth has to divide up
+  // before horizontal scrolling has to take over.
+  useLayoutEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper) return;
+    const measure = () => setWrapperWidth(wrapper.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(wrapper);
+    return () => observer.disconnect();
+  }, []);
+
   // Same confirm Diagram's own Clear carries, worded for one file instead of
   // every loaded one.
   function handleClear() {
@@ -535,12 +584,23 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
           is, and header/body share this as their common ancestor, which is
           what keeps the 1px gap between them falling out of styles.css for
           free, same as before. */}
-      <div className="bg" style={{ flexDirection: 'column', flex: 1, minHeight: 0, minWidth: 0, overflowX: 'auto' }}>
+      <div
+        ref={wrapperRef}
+        className="bg"
+        style={{ flexDirection: 'column', flex: 1, minHeight: 0, minWidth: 0, overflowX: 'auto' }}
+      >
         {renderHeader(strata, true)}
         <div
           ref={bodyRef}
           className="bg"
-          style={{ flex: 1, flexDirection: 'column', overflowY: 'auto', minWidth: minTableWidth }}
+          // overflowX is explicit, not left to default to visible: a
+          // non-visible overflow-y with overflow-x still visible computes
+          // overflow-x to auto too (the CSS spec's own rule for that
+          // combination), which was giving the body its own independent
+          // horizontal scrollbar -- so scrolling it moved only the body,
+          // leaving the header and title behind instead of the wrapper
+          // above carrying all three together as it's meant to.
+          style={{ flex: 1, flexDirection: 'column', overflowY: 'auto', overflowX: 'hidden', minWidth: tableWidth }}
           onScroll={handleScroll}
         >
           {batches.length === 0
@@ -560,8 +620,9 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
 // be called conditionally inline the way the value headers' map callback
 // does above -- this is exactly one call site, not a loop, so there's
 // nothing conditional about it.
-function ReorderableStratumHeader({ column, options, selected, onSelect, onReorder }: {
+function ReorderableStratumHeader({ column, columnWidth, options, selected, onSelect, onReorder }: {
   column: StratumColumn;
+  columnWidth: number;
   options: Option[];
   selected: string;
   onSelect: (value: string) => void;
@@ -577,7 +638,9 @@ function ReorderableStratumHeader({ column, options, selected, onSelect, onReord
       label={humanize(column.name)}
       italic={selected !== 'all'}
       onSelect={onSelect}
-      style={{ flex: 1, minWidth: 0, padding: '1em 0' }}
+      // A fixed width, not a flex share -- see the long note on CellBox for
+      // why this can't be left to a proportional split any more.
+      style={{ flex: '0 0 auto', width: columnWidth, padding: '1em 0' }}
       onPointerDown={drag.onPointerDown}
       onPointerMove={drag.onPointerMove}
       onPointerUp={drag.onPointerUp}
@@ -594,13 +657,14 @@ function ReorderableStratumHeader({ column, options, selected, onSelect, onReord
 // that.
 // No italic here, unlike the stratum headers: italic means "this column is
 // filtering the rows", and clicking a value header only colors it.
-function DraggableValueHeaderCell({ column, onSelect, onReorder }: {
+function DraggableValueHeaderCell({ column, columnWidth, onSelect, onReorder }: {
   column: ValueColumn;
+  columnWidth: number;
   onSelect: () => void;
   onReorder: (from: string, to: string) => void;
 }) {
   const drag = useColumnDrag(column.name, onReorder);
   return (
-    <CellBox flex={1} dragProps={drag} cell={{ text: humanize(column.name), onClick: onSelect }} />
+    <CellBox width={columnWidth} dragProps={drag} cell={{ text: humanize(column.name), onClick: onSelect }} />
   );
 }

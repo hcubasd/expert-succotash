@@ -60,60 +60,57 @@ describe('simplifyNetwork', () => {
     // the exclusion shrinks until nothing excludes anything, every link is a
     // boundary between two hubs, and the original network is back.
     const graph = graphOf(chain);
-    const virtual = simplifyNetwork(graph, chainValues, WIDE, 1e-9, 'sum');
+    const virtual = simplifyNetwork(graph, chainValues, WIDE, 1e-9);
     expect(virtual.positions.length / 4).toBe(graph.linkCount);
   });
 
   it('collapses to nothing when one hub swallows everything', () => {
     // Every node owned by the same hub means every link is interior, and
     // interior links are absorbed rather than drawn.
-    const virtual = simplifyNetwork(graphOf(chain), chainValues, WIDE, 1e9, 'sum');
+    const virtual = simplifyNetwork(graphOf(chain), chainValues, WIDE, 1e9);
     expect(virtual.positions.length).toBe(0);
   });
 
   it('draws each virtual edge straight between the two hubs it joins', () => {
-    const virtual = simplifyNetwork(graphOf(chain), chainValues, WIDE, 1e-9, 'sum');
+    const virtual = simplifyNetwork(graphOf(chain), chainValues, WIDE, 1e-9);
     // With every node a hub, the first edge is exactly the first real link.
     const ends = Array.from(virtual.positions.subarray(0, 4));
     expect(ends).toEqual([0, 0, 1, 0]);
   });
 
-  it('adds up quantities carried over a frontier', () => {
-    // Two links bridging the same pair of hubs: counts and grams are amounts
-    // crossing there, so the frontier's total is their sum.
+  it('never folds two links into one value, however they overlap', () => {
+    // Two links bridging the same pair of points. Collapsing eliminates
+    // links, it never adds their values together: each survivor keeps the
+    // count it actually carries, so the pair stays 3 and 5 rather than
+    // becoming an 8 that no road in the data has.
     const parallel = graphOf([line([[0, 0], [2, 0]]), line([[0, 0], [2, 0]])]);
-    const virtual = simplifyNetwork(parallel, Float64Array.from([3, 5]), WIDE, 1e-9, 'sum');
-    expect(virtual.values.length).toBe(1);
-    expect(virtual.values[0]).toBe(8);
+    const virtual = simplifyNetwork(parallel, Float64Array.from([3, 5]), WIDE, 1e-9);
+    expect(virtual.values.length).toBe(2);
+    expect(Array.from(virtual.values).sort((a, b) => a - b)).toEqual([3, 5]);
   });
 
-  it('averages road properties over a frontier instead of adding them', () => {
-    // Grade is a property of the road, not a quantity moving along it: two
-    // links at 3% and 5% make a 4% frontier, never an 8% one.
+  it('leaves road properties alone too, averaging nothing', () => {
+    // Grade took a length-weighted mean under the old aggregating version.
+    // There is no frontier left to hold an averaged grade: two links at 3%
+    // and 5% stay a 3% link and a 5% link.
     const parallel = graphOf([line([[0, 0], [2, 0]]), line([[0, 0], [2, 0]])]);
-    const virtual = simplifyNetwork(parallel, Float64Array.from([3, 5]), WIDE, 1e-9, 'mean');
-    expect(virtual.values[0]).toBeCloseTo(4, 6);
+    const virtual = simplifyNetwork(parallel, Float64Array.from([3, 5]), WIDE, 1e-9);
+    expect(Array.from(virtual.values).sort((a, b) => a - b)).toEqual([3, 5]);
   });
 
-  it('weights that average by length, so a long climb outweighs a short one', () => {
-    const parallel = graphOf([line([[0, 0], [10, 0]]), line([[0, 0], [10, 0]]), line([[0, 0], [10, 0]])]);
-    // Same pair of endpoints, so the graph sees three links of equal length;
-    // an unweighted mean and a weighted one agree here, which is the point --
-    // weighting only ever changes the answer when the lengths differ.
-    const virtual = simplifyNetwork(parallel, Float64Array.from([0, 3, 6]), WIDE, 1e-9, 'mean');
-    expect(virtual.values[0]).toBeCloseTo(3, 6);
-  });
-
-  it('ignores links whose value is missing rather than counting them as zero', () => {
+  it('keeps a missing value missing rather than borrowing a neighbour\'s', () => {
+    // The survivor with no value stays NaN -- the caller paints that as
+    // structure. It never inherits the 4 drawn beside it.
     const parallel = graphOf([line([[0, 0], [2, 0]]), line([[0, 0], [2, 0]])]);
-    const virtual = simplifyNetwork(parallel, Float64Array.from([4, NaN]), WIDE, 1e-9, 'mean');
-    expect(virtual.values[0]).toBe(4);
+    const virtual = simplifyNetwork(parallel, Float64Array.from([4, NaN]), WIDE, 1e-9);
+    expect(virtual.values.length).toBe(2);
+    expect(Array.from(virtual.values).filter(Number.isFinite)).toEqual([4]);
   });
 
   it('leaves out what the viewport does not touch', () => {
     const graph = graphOf(chain);
     const near = { minX: -0.5, minY: -0.5, maxX: 1.5, maxY: 0.5 };
-    const virtual = simplifyNetwork(graph, chainValues, near, 1e-9, 'sum');
+    const virtual = simplifyNetwork(graph, chainValues, near, 1e-9);
     // the far end of the chain is off screen and contributes nothing
     expect(virtual.positions.length / 4).toBeLessThan(graph.linkCount);
   });
@@ -125,25 +122,26 @@ describe('real shape at full detail', () => {
   const bent = [line([[0, 0], [1, 2], [2, 0]])];
 
   it('draws a link\'s own bends once it stands alone between two hubs', () => {
-    const virtual = simplifyNetwork(graphOf(bent), Float64Array.from([1]), WIDE, 1e-9, 'mean');
+    const virtual = simplifyNetwork(graphOf(bent), Float64Array.from([1]), WIDE, 1e-9);
     expect(virtual.positions.length / 4).toBe(2);
     expect(Array.from(virtual.positions)).toEqual([0, 0, 1, 2, 1, 2, 2, 0]);
   });
 
-  it('flattens the same link to a chord when it is only part of a frontier', () => {
-    // Two links between the same pair of hubs aggregate, so neither one is
-    // the edge on its own and the edge has no single shape to take.
+  it('still draws each link\'s own bends when two share a pair of endpoints', () => {
+    // These two used to aggregate into one shapeless chord. Nothing merges
+    // any more, so the bent one keeps its bend and the straight one stays
+    // straight: three segments in total, both roads still themselves.
     const parallel = graphOf([line([[0, 0], [1, 2], [2, 0]]), line([[0, 0], [2, 0]])]);
-    const virtual = simplifyNetwork(parallel, Float64Array.from([1, 1]), WIDE, 1e-9, 'mean');
-    expect(virtual.positions.length / 4).toBe(1);
-    expect(Array.from(virtual.positions)).toEqual([0, 0, 2, 0]);
+    const virtual = simplifyNetwork(parallel, Float64Array.from([1, 1]), WIDE, 1e-9);
+    expect(virtual.positions.length / 4).toBe(3);
+    expect(Array.from(virtual.positions)).toEqual([0, 0, 1, 2, 1, 2, 2, 0, 0, 0, 2, 0]);
   });
 
   it('marks only the ends of a link as shared, never its bends', () => {
     // A bend belongs to one link alone, so nothing can meet it there. This
     // is what lets joins blend over node ids rather than by rediscovering
     // shared coordinates across every endpoint on screen.
-    const virtual = simplifyNetwork(graphOf(bent), Float64Array.from([1]), WIDE, 1e-9, 'mean');
+    const virtual = simplifyNetwork(graphOf(bent), Float64Array.from([1]), WIDE, 1e-9);
     const interior = Array.from(virtual.endpointNode).filter(n => n < 0).length;
     expect(interior).toBe(2); // the bend, seen from each of the two segments
     expect(virtual.endpointNode[0]).toBeGreaterThanOrEqual(0);
@@ -151,12 +149,12 @@ describe('real shape at full detail', () => {
   });
 
   it('repeats the link\'s value along every segment it draws', () => {
-    const virtual = simplifyNetwork(graphOf(bent), Float64Array.from([7]), WIDE, 1e-9, 'mean');
+    const virtual = simplifyNetwork(graphOf(bent), Float64Array.from([7]), WIDE, 1e-9);
     expect(Array.from(virtual.values)).toEqual([7, 7]);
   });
 
   it('keeps a chord\'s endpoints as real nodes, so hubs still blend', () => {
-    const virtual = simplifyNetwork(graphOf(chainForShape), Float64Array.from([1, 2, 3]), WIDE, 1.5, 'sum');
+    const virtual = simplifyNetwork(graphOf(chainForShape), Float64Array.from([1, 2, 3]), WIDE, 1.5);
     for (const node of virtual.endpointNode) expect(node).toBeGreaterThanOrEqual(0);
   });
 });

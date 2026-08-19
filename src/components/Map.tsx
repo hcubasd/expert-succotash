@@ -2,19 +2,29 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { colorBg, squeezeFg } from 'psychic-potato';
 import { MapRenderer } from '../gl/renderer';
 import type { View } from '../gl/renderer';
-import { boundsOf } from '../lib/geometryMaker';
+import { boundsOfActive } from '../lib/geometryMaker';
 import type { Bounds, Geometries } from '../lib/geometryMaker';
 import { LUMINANCE } from '../lib/colors';
-import { DEFAULT_DETAIL, buildScene, legendFromFlow } from '../lib/mapScene';
+import { buildScene, legendFromFlow } from '../lib/mapScene';
 import type { BuiltScene, Legend } from '../lib/mapScene';
-import type { Draft, Tables } from '../lib/mapValues';
+import type { Draft, MapMode, Tables } from '../lib/mapValues';
 import MapPanel from './MapPanel';
+
+type Camera = { geometries: Geometries; view: View; history: View[] };
 
 type Props = {
   tables: Tables;
   geometries: Geometries;
   draft: Draft;
   onDraft: (draft: Draft) => void;
+  detail: Record<MapMode, number>;
+  onDetail: (detail: Record<MapMode, number>) => void;
+  lineWidth: number;
+  onLineWidth: (lineWidth: number) => void;
+  // Owned by App so it outlives this component: leaving for the diagram or a
+  // table unmounts the map entirely, and the camera has to be waiting when
+  // you come back rather than starting over at the full extent.
+  camera: React.MutableRefObject<Camera | null>;
   onDiagram: () => void;
 };
 
@@ -55,7 +65,9 @@ function fitView(bounds: Bounds | null, width: number, height: number): View {
   };
 }
 
-export default function Map({ tables, geometries, draft, onDraft, onDiagram }: Props) {
+export default function Map({
+  tables, geometries, draft, onDraft, detail, onDetail, lineWidth, onLineWidth, camera, onDiagram,
+}: Props) {
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<MapRenderer | null>(null);
@@ -73,11 +85,13 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
   const [history, setHistory] = useState<View[]>([]);
   const [flowLegend, setFlowLegend] = useState<Legend | null>(null);
   const [legends, setLegends] = useState<BuiltScene['legends']>({ zones: null, agents: null, network: null });
-  // detail is what the slider shows and moves instantly; committedDetail is
-  // what actually drives a recompute. Kept as two states even at zero delay,
-  // so a real debounce is a constant to change, not new wiring to add.
-  const [detail, setDetail] = useState(DEFAULT_DETAIL);
-  const [committedDetail, setCommittedDetail] = useState(DEFAULT_DETAIL);
+  // detail is what the sliders show and move instantly, and lives in App so
+  // it survives leaving the map; committedDetail is what actually drives a
+  // recompute. Kept as two values even at zero delay, so a real debounce is
+  // a constant to change, not new wiring to add. One value per layer --
+  // moving one slider replaces the whole record with a new object, which is
+  // what the effect below keys its own re-commit on.
+  const [committedDetail, setCommittedDetail] = useState<Record<MapMode, number>>(detail);
 
   useEffect(() => {
     const delay = detailDebounceFor();
@@ -170,15 +184,49 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
 
   // Positions never change once loaded, but the buffers are keyed per
   // geometry object -- a reloaded file means new arrays and a new upload.
-  // Fits to everything loaded, not just whichever layers are toggled on:
-  // toggling a layer is a filter on what's already framed, not a reason to
-  // move the camera, so only a real geometry change re-fits here.
+  // Frames whichever layers are switched on, so the camera never opens
+  // around geometry that isn't being drawn. Toggling a layer afterwards does
+  // not re-fit -- that's a filter on what's already framed, not a reason to
+  // move the camera -- which is why `active` is read here but is not a
+  // dependency.
+  //
+  // A camera saved against these same geometries is restored instead, which
+  // is what carries the zoom across a trip to the diagram or a table. The
+  // view is resolution independent -- scaleX is 2 * FIT_PADDING / world
+  // width, with no pixel term in it, so 1/scaleX is a world extent -- which
+  // is why restoring one across a resize keeps the same ground visible
+  // rather than needing to be rescaled.
+  //
+  // Nothing happens until the canvas has a real size. fitView hands back a
+  // unit view at width 0, and saving *that* against these geometries is what
+  // made the next pass restore it instead of fitting: the map opened at
+  // scale 1 over coordinates in the hundreds of thousands, which is the
+  // "zoomed into somewhere random" case.
   useLayoutEffect(() => {
+    if (size.width === 0) return;
     rendererRef.current?.invalidate();
-    viewRef.current = fitView(boundsOf(geometries), size.width, size.height);
-    setHistory([]);
+    const saved = camera.current;
+    if (saved && saved.geometries === geometries) {
+      viewRef.current = saved.view;
+      setHistory(saved.history);
+    } else {
+      viewRef.current = fitView(boundsOfActive(geometries, draft.active), size.width, size.height);
+      setHistory([]);
+    }
     setViewVersion(v => v + 1);
-  }, [geometries, size.width, size.height]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see above: the
+    // active set is read at fit time but must not itself trigger a re-fit.
+  }, [geometries, size.width, size.height, camera]);
+
+  // Written back on every commit that moves the camera -- a zoom rectangle,
+  // Back, Reset -- rather than only on unmount, since unmount is not a hook
+  // that can read the ref's latest value reliably. Guarded on the same
+  // measurement as the fit above, so an unmeasured view is never what a
+  // later mount finds waiting for it.
+  useEffect(() => {
+    if (size.width === 0) return;
+    camera.current = { geometries, view: viewRef.current, history };
+  }, [camera, geometries, history, viewVersion, size.width]);
 
   useLayoutEffect(() => {
     const renderer = rendererRef.current;
@@ -193,6 +241,7 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
       pixelsPerUnit(view, size.width),
       size.ratio,
       committedDetail,
+      lineWidth,
     );
     const stats = renderer.render(built.scene);
 
@@ -200,7 +249,10 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
     // Desire lines can only be measured by drawing them, so their legend
     // arrives with the render's return value rather than ahead of it.
     setFlowLegend(built.pendingFlowRamp && stats ? legendFromFlow(stats, built.pendingFlowRamp) : null);
-  }, [tables, geometries, draft, size, viewVersion, committedDetail]);
+    // lineWidth isn't debounced like detail is: it never touches thinning or
+    // collapse, just a number handed to the renderer, so there's no
+    // expensive recompute a debounce would be protecting against.
+  }, [tables, geometries, draft, size, viewVersion, committedDetail, lineWidth]);
 
   function toWorld(clientX: number, clientY: number) {
     const canvas = canvasRef.current!;
@@ -271,10 +323,10 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
   // separate, un-undoable jump.
   const resetView = useCallback(() => {
     const previous = viewRef.current;
-    viewRef.current = fitView(boundsOf(geometries), size.width, size.height);
+    viewRef.current = fitView(boundsOfActive(geometries, draft.active), size.width, size.height);
     setHistory(h => [...h, previous]);
     setViewVersion(v => v + 1);
-  }, [geometries, size.width, size.height]);
+  }, [geometries, draft.active, size.width, size.height]);
 
   return (
     // The whole view is the colorBg root, so the 1px gap between canvas and
@@ -355,7 +407,9 @@ export default function Map({ tables, geometries, draft, onDraft, onDiagram }: P
         legends={legends}
         flowLegend={flowLegend}
         detail={detail}
-        onDetail={setDetail}
+        onDetail={(mode, value) => onDetail({ ...detail, [mode]: value })}
+        lineWidth={lineWidth}
+        onLineWidth={onLineWidth}
       />
     </div>
   );

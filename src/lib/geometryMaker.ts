@@ -424,3 +424,22 @@ export function boundsOf(geometries: Geometries): Bounds | null {
   ]);
 }
 
+// Framing only what is actually being drawn. Fitting to everything loaded
+// puts the camera around geometry that may be switched off, which reads as
+// the map opening somewhere arbitrary -- the extent it framed is off screen
+// by definition. Falls back to the full extent when nothing is on, since a
+// camera has to be somewhere and an empty union has no answer.
+export function boundsOfActive(
+  geometries: Geometries,
+  active: { zones: boolean; agents: boolean; network: boolean; desire_lines: boolean },
+): Bounds | null {
+  return boundsOfArrays([
+    ...(active.zones ? zoneArrays(geometries) : []),
+    ...(active.network && geometries.network ? [geometries.network.positions] : []),
+    ...(active.agents && geometries.agents ? [geometries.agents.positions] : []),
+    ...(active.desire_lines && geometries.desireLines
+      ? [...geometries.desireLines.values()].map(e => e.positions)
+      : []),
+  ]) ?? boundsOf(geometries);
+}
+

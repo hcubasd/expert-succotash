@@ -8,7 +8,16 @@ import type { RawCell, RawGeometry, RawTable } from './rawTable';
 // wasm binary is imported as an asset rather than hand-placed in public/, so
 // Vite resolves it from node_modules and content-hashes it for us.
 
-export type GpkgTable = RawTable & { geometries: RawGeometry[] | null };
+// srsId is the layer's own gpkg_contents.srs_id, straight off the file --
+// not resolved against gpkg_spatial_ref_sys into a real projection, unit,
+// or anything else. Nothing here tries to convert coordinates: two files
+// can carry the same srs_id and still be some other tool's placeholder for
+// "undefined", and this app has no way to tell that apart from a real,
+// agreed-upon CRS. What it can tell is whether two loaded files *disagree*
+// -- different ids means neither can be assumed to explain the other's
+// numbers -- and that's the one thing worth surfacing without pretending
+// to solve unit conversion in the browser.
+export type GpkgTable = RawTable & { geometries: RawGeometry[] | null; srsId: number | null };
 
 let sql: SqlJsStatic | null = null;
 
@@ -26,16 +35,25 @@ export async function loadGpkg(buffer: ArrayBuffer): Promise<GpkgTable> {
   const db = new SQL.Database(new Uint8Array(buffer));
   try {
     let layers: string[] = [];
+    let srsId: number | null = null;
     try {
-      const listed = db.exec('SELECT table_name FROM gpkg_contents');
-      layers = (listed[0]?.values ?? []).map(r => String(r[0]));
+      const listed = db.exec('SELECT table_name, srs_id FROM gpkg_contents');
+      const rows = listed[0]?.values ?? [];
+      layers = rows.map(r => String(r[0]));
+      // Every gpkg_contents row we've ever seen carries the same srs_id for
+      // a single-layer file, which is all this app ever loads -- the first
+      // row's value stands for the layer.
+      if (rows.length > 0 && rows[0][1] !== null && rows[0][1] !== undefined) {
+        const parsed = Number(rows[0][1]);
+        if (Number.isFinite(parsed)) srsId = parsed;
+      }
     } catch {
       // not a GeoPackage, or no contents table -- nothing to read
     }
-    if (layers.length === 0) return { headers: [], columns: [], rowCount: 0, geometries: null };
+    if (layers.length === 0) return { headers: [], columns: [], rowCount: 0, geometries: null, srsId: null };
 
     const result = db.exec(`SELECT * FROM "${layers[0]}"`);
-    if (!result[0]) return { headers: [], columns: [], rowCount: 0, geometries: null };
+    if (!result[0]) return { headers: [], columns: [], rowCount: 0, geometries: null, srsId };
 
     const all = result[0].columns;
     const values = result[0].values;
@@ -71,6 +89,7 @@ export async function loadGpkg(buffer: ArrayBuffer): Promise<GpkgTable> {
       columns,
       rowCount: values.length,
       geometries: geomIndex >= 0 ? geometries : null,
+      srsId,
     };
   } finally {
     db.close();

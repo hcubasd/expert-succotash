@@ -166,6 +166,7 @@ export default function Diagram({ loaded, onOpenTable, onPickFile, onBack, onCle
                       // exactly the same height.
                       flex: 1,
                       padding: '1em 0',
+                      borderRadius: '1em',
                       cursor: 'pointer',
                       position: 'relative',
                       zIndex: 1,

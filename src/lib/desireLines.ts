@@ -110,22 +110,28 @@ function visibleIn(pool: EndpointPool, viewport: Bounds) {
 }
 
 export type ConsolidatedFlow = {
-  // x1,y1,x2,y2 per surviving edge -- straight, bucket to bucket. Doubles as
-  // the endpoint list for the joins, since it is already a list of x,y pairs.
+  // x1,y1,x2,y2 per surviving line -- straight, endpoint to endpoint. Doubles
+  // as the endpoint list for the joins, since it is already a list of x,y
+  // pairs.
   positions: Float32Array;
-  // One summed quantity per edge, fed to the GPU accumulator exactly as the
-  // unconsolidated quantities are.
+  // Each surviving line's own quantity, fed to the GPU accumulator exactly as
+  // the unconsolidated quantities are.
   quantities: Float32Array;
 };
 
-// Every line's two endpoints are replaced by whichever bucket absorbed them,
-// and lines that end up between the same pair of buckets sum together.
+// Every line's two endpoints move to whichever surviving point absorbed
+// them, and the line keeps its own quantity. Two lines that end up between
+// the same pair of points stay two lines drawn on top of each other, never
+// one line carrying their total: collapsing is elimination, so nothing is
+// ever added together here. The GPU accumulator still adds overlapping flow
+// as it draws, which is how this layer has always read density -- but that
+// is the renderer compositing what survived, not the geometry inventing a
+// quantity no desire line has.
 //
-// A line whose two ends land in the *same* bucket is dropped: that is flow
+// A line whose two ends land on the *same* point is dropped: that is flow
 // entirely internal to one cluster, with no two places left to draw between.
-// So unlike the agents, the total here is not preserved as the view coarsens
-// -- internal flow leaves the picture, exactly as the network's interior
-// links do.
+// Its quantity goes with it rather than moving anywhere else, exactly as a
+// collapsed network link's load does.
 export function consolidateDesireLines(
   positions: Float32Array,
   quantities: Float32Array,
@@ -146,7 +152,7 @@ export function consolidateDesireLines(
   const ownerOf = new Int32Array(pool.count).fill(-1);
   for (let k = 0; k < candidates.length; k++) ownerOf[candidates[k]] = owners[k];
 
-  const totals = new Map<number, { sum: number; a: number; b: number }>();
+  const survivors: { quantity: number; a: number; b: number }[] = [];
   for (let e = 0; e < pool.edgeCount; e++) {
     if (!visibleEdge[e]) continue;
     const ownerA = ownerOf[pool.edgeA[e]];
@@ -156,25 +162,20 @@ export function consolidateDesireLines(
     const quantity = quantities[e];
     if (!Number.isFinite(quantity)) continue;
 
-    const low = Math.min(ownerA, ownerB);
-    const high = Math.max(ownerA, ownerB);
-    const key = low * pool.count + high;
-    const entry = totals.get(key);
-    if (entry) entry.sum += quantity;
-    else totals.set(key, { sum: quantity, a: low, b: high });
+    survivors.push({ quantity, a: ownerA, b: ownerB });
   }
 
-  const out = new Float32Array(totals.size * 4);
-  const sums = new Float32Array(totals.size);
+  const out = new Float32Array(survivors.length * 4);
+  const kept = new Float32Array(survivors.length);
   let at = 0;
-  for (const { sum, a, b } of totals.values()) {
+  for (const { quantity, a, b } of survivors) {
     out[at * 4] = pool.x[a];
     out[at * 4 + 1] = pool.y[a];
     out[at * 4 + 2] = pool.x[b];
     out[at * 4 + 3] = pool.y[b];
-    sums[at] = sum;
+    kept[at] = quantity;
     at++;
   }
 
-  return { positions: out, quantities: sums };
+  return { positions: out, quantities: kept };
 }

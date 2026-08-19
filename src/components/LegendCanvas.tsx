@@ -1,7 +1,11 @@
 import { useLayoutEffect, useRef } from 'react';
 import type { Legend } from '../lib/mapScene';
 
-const BANDS = 128;
+// Bands come from the ramp itself rather than a constant: the map's ramps
+// are a quarter of the wheel now that four layers divide it, and a legend
+// that painted a fixed 128 would either repeat colours or run off the end
+// of a shorter ramp.
+const bandsOf = (ramp: Legend['ramp']) => ramp.length;
 // The label band's own height, in em so it tracks whatever font size the
 // panel settled on. The tick track is inset by half of this at each end so
 // the top and bottom labels sit fully inside the bar rather than hanging
@@ -19,7 +23,7 @@ function rand(seed: number) {
   };
 }
 
-// Every pixel in the bar is one of the 128 real ramp colors, never an RGB
+// Every pixel in the bar is one of the real ramp colors, never an RGB
 // interpolation between two of them -- band i (0 at the bottom, the ramp's
 // lowest value) covers a run of rows, and each pixel in it is sampled from a
 // window starting at i and reaching up toward the top of the bar, rather
@@ -36,22 +40,36 @@ function rand(seed: number) {
 // Sized from one measurement of the wrapper, used for both the CSS box and
 // the drawing buffer: resolving "the same" size twice (once as a percentage,
 // once in device pixels) is what leaves a one-pixel seam at an edge.
-function paint(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number, ramp: Legend['ramp']) {
+// The canvas covers its own box exactly, at whatever position that box
+// happens to sit -- deliberately *not* snapped to the device-pixel grid.
+//
+// Snapping was tried and is wrong here, for a reason worth recording: this
+// canvas has siblings. The dropdowns stacked above it in the same column are
+// plain .bg divs, and the browser antialiases their backgrounds across a
+// fractional edge rather than snapping them. Snapping only the canvas
+// therefore pulls it off its own column's edge by up to a device pixel,
+// differently in each column since each sits at a different fraction --
+// which reads exactly as one column's legend being shifted against the
+// others. Matching the box exactly keeps the canvas edge wherever its
+// siblings' edges are, whatever that is.
+//
+// Crispness is then a layout property, not this function's to fix: it comes
+// from the columns landing on whole pixels in the first place (see
+// MapPanel's own integer column widths), and when they do, the rounding
+// below is exact and there is nothing to resample.
+function paint(canvas: HTMLCanvasElement, box: DOMRect, ramp: Legend['ramp']) {
   const ratio = window.devicePixelRatio || 1;
-  if (cssWidth <= 0 || cssHeight <= 0) return;
-  const width = Math.max(1, Math.round(cssWidth * ratio));
-  const height = Math.max(1, Math.round(cssHeight * ratio));
+  if (box.width <= 0 || box.height <= 0) return;
+
+  const width = Math.max(1, Math.round(box.width * ratio));
+  const height = Math.max(1, Math.round(box.height * ratio));
   canvas.width = width;
   canvas.height = height;
-  // The CSS size has to be stated outright, in the same measured pixels the
-  // buffer was sized from. A canvas is a replaced element with intrinsic
-  // dimensions -- its buffer size -- and an absolutely positioned replaced
-  // element with `width: auto` takes those intrinsic dimensions rather than
-  // stretching to its offsets, so inset: 0 alone leaves it drawn at
-  // devicePixelRatio times its slot: exactly twice too big on a 2x display,
-  // in both directions, with the overflow running off the bottom.
-  canvas.style.width = `${cssWidth}px`;
-  canvas.style.height = `${cssHeight}px`;
+  // A canvas is a replaced element whose intrinsic size is its buffer, so an
+  // absolutely positioned one with width:auto would draw at buffer size --
+  // devicePixelRatio times too big. The CSS size has to be stated outright.
+  canvas.style.width = `${box.width}px`;
+  canvas.style.height = `${box.height}px`;
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
@@ -61,18 +79,19 @@ function paint(canvas: HTMLCanvasElement, cssWidth: number, cssHeight: number, r
 
   // Band boundaries as rounded proportional positions rather than an
   // explicit per-band remainder split -- the two are equivalent (every band
-  // gets its floor height or one more, evenly spread across the 128), this
+  // gets its floor height or one more, evenly spread across the ramp), this
   // is just the simpler way to get there.
-  const bandTop = (i: number) => Math.round((i / BANDS) * height); // pixels up from the bottom
+  const bands = bandsOf(ramp);
+  const bandTop = (i: number) => Math.round((i / bands) * height); // pixels up from the bottom
 
-  for (let i = 0; i < BANDS; i++) {
+  for (let i = 0; i < bands; i++) {
     const from = bandTop(i);
     const to = bandTop(i + 1);
     const bandHeight = to - from;
     if (bandHeight <= 0) continue;
 
     const sampleCount = Math.max(1, Math.round(Math.log(Math.max(Math.E, bandHeight * width))));
-    const hi = Math.min(BANDS - 1, i + sampleCount - 1);
+    const hi = Math.min(bands - 1, i + sampleCount - 1);
 
     for (let fromBottom = from; fromBottom < to; fromBottom++) {
       const row = height - 1 - fromBottom;
@@ -122,7 +141,11 @@ export default function LegendCanvas({ legend }: Props) {
     const wrapper = wrapperRef.current;
     const canvas = canvasRef.current;
     if (!wrapper || !canvas) return;
-    const repaint = () => paint(canvas, wrapper.clientWidth, wrapper.clientHeight, legend.ramp);
+    // The whole rect, not just its width and height: paint() needs the
+    // box's absolute position to know which device pixels its edges fall
+    // on, and clientWidth/clientHeight are rounded to whole CSS pixels and
+    // carry no position at all.
+    const repaint = () => paint(canvas, wrapper.getBoundingClientRect(), legend.ramp);
     repaint();
     const observer = new ResizeObserver(repaint);
     observer.observe(wrapper);

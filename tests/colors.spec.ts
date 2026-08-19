@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SESSION_ROTATION, gradientAt, indexColor, ngon, ngonStarts, ramps, semicircle, uniqueOrdered,
+  MAP_LAYERS, MAP_RAMP_LENGTH, SESSION_ROTATION, gradientAt, indexColor, mapRamp,
+  ngon, ngonStarts, semicircle, uniqueOrdered,
   wheel,
 } from '../src/lib/colors';
 
@@ -54,22 +55,46 @@ describe('gradientAt', () => {
   });
 });
 
-describe('ramps', () => {
-  it('gives one 128-color ramp per resource', () => {
-    const built = ramps(3);
-    expect(built).toHaveLength(3);
-    for (const ramp of built) expect(ramp).toHaveLength(128);
+describe('mapRamp', () => {
+  it('gives each layer a quarter of the wheel', () => {
+    for (let layer = 0; layer < MAP_LAYERS; layer++) {
+      expect(mapRamp(layer, 0, 3)).toHaveLength(MAP_RAMP_LENGTH);
+    }
   });
 
-  it('starts each ramp on its own n-gon vertex, so resources start far apart', () => {
-    const starts = ngon(4, SESSION_ROTATION);
-    ramps(4).forEach((ramp, i) => expect(ramp[0]).toEqual(starts[i]));
+  it('shares no colour between the four layers, which is the whole point', () => {
+    // Four layers are on screen at once, so a hue has to name exactly one of
+    // them. Tiling the wheel in quarters is what guarantees that outright
+    // rather than merely making collisions unlikely.
+    const seen = new Set<string>();
+    for (let layer = 0; layer < MAP_LAYERS; layer++) {
+      for (const c of mapRamp(layer, 1, 5)) seen.add(`${c.r},${c.g},${c.b}`);
+    }
+    expect(seen.size).toBe(MAP_LAYERS * MAP_RAMP_LENGTH);
+  });
+
+  it('stays disjoint whatever resource it is rotated to', () => {
+    for (const resource of [0, 1, 2, 3]) {
+      const seen = new Set<string>();
+      for (let layer = 0; layer < MAP_LAYERS; layer++) {
+        for (const c of mapRamp(layer, resource, 4)) seen.add(`${c.r},${c.g},${c.b}`);
+      }
+      expect(seen.size).toBe(MAP_LAYERS * MAP_RAMP_LENGTH);
+    }
+  });
+
+  it('moves a layer\'s hues when the resource changes', () => {
+    const first = mapRamp(0, 0, 4)[0];
+    const second = mapRamp(0, 1, 4)[0];
+    expect(first).not.toEqual(second);
   });
 
   it('draws every ramp color from the wheel itself -- no invented colors', () => {
     const onWheel = new Set(wheel().map(c => `${c.r},${c.g},${c.b}`));
-    for (const ramp of ramps(5)) {
-      for (const color of ramp) expect(onWheel.has(`${color.r},${color.g},${color.b}`)).toBe(true);
+    for (let layer = 0; layer < MAP_LAYERS; layer++) {
+      for (const color of mapRamp(layer, 2, 5)) {
+        expect(onWheel.has(`${color.r},${color.g},${color.b}`)).toBe(true);
+      }
     }
   });
 });
@@ -103,9 +128,10 @@ describe('ngonStarts', () => {
 
 describe('session rotation', () => {
   it('is shared, so every palette in a session is spaced off one origin', () => {
-    // ramps and stratum starts must agree for the same n, or the two levels
-    // would be measuring from different places.
-    expect(ramps(4).map(r => r[0])).toEqual(ngonStarts(4).map(i => wheel()[i]));
+    // an n-gon's rotation index is its first vertex's wheel index, so a
+    // wheel index can be handed straight back in as a rotation. Everything
+    // built on top of ngonStarts depends on that holding.
+    expect(ngonStarts(4).map(i => wheel()[i])).toEqual(ngon(4, SESSION_ROTATION));
   });
 
   it('offsets the whole wheel rather than reordering it', () => {

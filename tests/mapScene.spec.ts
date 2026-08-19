@@ -88,20 +88,24 @@ describe('thinAgents', () => {
     expect(kept.radiusCssPx * 2).toBeGreaterThanOrEqual(1);
   });
 
-  it('sums what it merges, so the total on screen is the true total', () => {
+  it('drops what it merges rather than carrying the value over', () => {
     const merged = thinAgents(positions, values, viewport, 1, 1, 0.1);
     expect(merged.values.length).toBeLessThan(4);
-    expect(Array.from(merged.values).reduce((a, b) => a + b, 0)).toBe(1 + 2 + 3 + 4);
+    // Elimination, not aggregation: the survivors keep their own values, so
+    // the total on screen is smaller than the true total rather than equal
+    // to it. Summing here is what made a circle mean something different at
+    // every zoom level.
+    expect(Array.from(merged.values).reduce((a, b) => a + b, 0)).toBeLessThan(1 + 2 + 3 + 4);
   });
 
-  it('keeps the total intact at every level of detail', () => {
-    // The property that makes aggregation trustworthy: coarsening changes
-    // how many circles there are, never how much they add up to.
-    const total = 1 + 2 + 3 + 4;
+  it('only ever shows values that a real agent actually has', () => {
+    // The property that makes elimination trustworthy, and the one summing
+    // broke: every number drawn is some agent's own, at every detail level,
+    // so two circles on screen are always directly comparable.
+    const real = new Set(Array.from(values));
     for (const detail of [0, 0.25, 0.5, 0.75, 1]) {
       const thinned = thinAgents(positions, values, viewport, 1, 1, detail);
-      const sum = Array.from(thinned.values).reduce((a, b) => a + b, 0);
-      expect(sum).toBeCloseTo(total, 9);
+      for (const value of thinned.values) expect(real.has(value)).toBe(true);
     }
   });
 

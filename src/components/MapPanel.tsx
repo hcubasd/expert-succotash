@@ -1,3 +1,4 @@
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { grayAt, rgbStr } from '../lib/colors';
 import { humanize } from '../lib/humanize';
 import type { Legend } from '../lib/mapScene';
@@ -16,9 +17,16 @@ type Props = {
   onDraft: (draft: Draft) => void;
   legends: { zones: Legend | null; agents: Legend | null; network: Legend | null };
   flowLegend: Legend | null;
-  detail: number;
-  onDetail: (detail: number) => void;
+  detail: Record<MapMode, number>;
+  onDetail: (mode: MapMode, detail: number) => void;
+  lineWidth: number;
+  onLineWidth: (lineWidth: number) => void;
 };
+
+// The slider's own range: 0 makes every line vanish, 8 is thick enough to
+// read as a highlight rather than a line. Not tied to LINE_WIDTH_CSS_PX --
+// that's a default starting value, not a ceiling.
+const MAX_LINE_WIDTH = 8;
 
 const ALL: Option = { value: 'all', label: 'All' };
 const LAYERS: { mode: MapMode; label: string }[] = [
@@ -69,8 +77,46 @@ function isGrayed(card: Card): boolean {
   return !shown || !!shown.unavailable;
 }
 
-export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, detail, onDetail }: Props) {
+export default function MapPanel({
+  tables, draft, onDraft, legends, flowLegend, detail, onDetail, lineWidth, onLineWidth,
+}: Props) {
   const resourceOptions: Option[] = [ALL, ...optionsOf(allResources(tables))];
+
+  // Four columns splitting the panel evenly land on fractional pixels
+  // almost always -- (panelWidth - 3) / 4 rarely divides cleanly -- and a
+  // fractional column edge is invisible on a solid .bg background but very
+  // visible on a legend, whose canvas either blurs across it or misses it
+  // by a device pixel. Neither is fixable from inside the canvas: it has to
+  // sit exactly where its own siblings sit, so the edges themselves are
+  // what have to be whole. Measured and divided here instead of left to
+  // flex, the same way the table gives its columns explicit integer widths.
+  //
+  // The remainder goes to the *last* column rather than being spread: every
+  // boundary a legend actually has to line up against is then a whole
+  // number, and the one fractional edge left over is the panel's own right
+  // edge, against the window, with nothing beside it to disagree with.
+  const columnsRef = useRef<HTMLDivElement>(null);
+  const [columnsWidth, setColumnsWidth] = useState(0);
+
+  useLayoutEffect(() => {
+    const element = columnsRef.current;
+    if (!element) return;
+    const measure = () => setColumnsWidth(element.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  const GAPS = LAYERS.length - 1;
+  const baseColumn = columnsWidth > 0 ? Math.floor((columnsWidth - GAPS) / LAYERS.length) : 0;
+  const lastColumn = columnsWidth > 0 ? columnsWidth - GAPS - baseColumn * (LAYERS.length - 1) : 0;
+  // Before the first measurement there is nothing to divide, so the columns
+  // fall back to flex and simply look the way they always did for one frame.
+  const columnStyle = (index: number): React.CSSProperties =>
+    (columnsWidth <= 0
+      ? { flex: 1 }
+      : { flex: '0 0 auto', width: index === LAYERS.length - 1 ? lastColumn : baseColumn });
 
   // --- zones: one card, no All -- supply/demand/needs/capacities are
   // different quantities with different units, not slices of one that could
@@ -111,10 +157,16 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
   // network.gpkg still has something to show rather than a blank column.
   const hasLoads = !!tables.network_loads;
   const hasEmissions = !!tables.network_emissions;
+  // Grade is deliberately not offered. Every other thing the map colours by
+  // is a quantity of some resource, and the ramps now rotate per resource --
+  // grade has no resource to rotate on, so it is the one driver that falls
+  // outside that scheme. Left out entirely rather than given an arbitrary
+  // rotation, until there's a decision about where it belongs. The selection
+  // type and featureValues still understand 'grade'; only the way in is
+  // closed.
   const networkSourceOptions: Option[] = [
     ...(hasLoads ? [{ value: 'loads', label: 'Vehicle count' }] : []),
     ...(hasEmissions ? [{ value: 'emissions', label: 'Emissions' }] : []),
-    ...(!hasLoads && !hasEmissions && tables.network ? [{ value: 'grade', label: 'Grade' }] : []),
   ];
   const netSource = draft.networkSource;
   const netTakesDimensions = netSource === 'loads' || netSource === 'emissions';
@@ -187,6 +239,42 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
 
   const resourceCard: Card = { options: resourceOptions, selected: draft.resource };
 
+  // A card with nothing chosen previews its first option, and until now that
+  // was only ever a label: the draft field stayed undefined, so the layer
+  // rendered neutral while its control read as already set. Loading a file
+  // and coming back to the map showed an enabled, apparently-selected card
+  // over an uncoloured map, and picking the value that was already displayed
+  // was what finally applied it. Committing the preview here is what makes
+  // the control and the map agree -- what you see selected is selected.
+  //
+  // One onDraft for all of them rather than one per card: each call rebuilds
+  // the draft from the same starting value, so separate calls would each
+  // discard the others' work. Network's dimensions resolve on a later pass,
+  // once its source is committed and their option lists exist at all, which
+  // is why this settles rather than needing to fill everything at once.
+  useEffect(() => {
+    const next = { ...draft };
+    let changed = false;
+    const fill = <K extends keyof Draft>(key: K, card: Card) => {
+      if (next[key] !== undefined) return;
+      const value = shownValue(card);
+      if (value === undefined) return;
+      next[key] = value as Draft[K];
+      changed = true;
+    };
+
+    fill('resource', resourceCard);
+    fill('zoneSource', zoneCards[0]);
+    fill('agentKind', agentCards[0]);
+    fill('networkSource', networkCards[0]);
+    fill('timeInterval', networkCards[1]);
+    fill('vehicle', networkCards[2]);
+    fill('pollutant', networkCards[3]);
+    fill('emissionSource', networkCards[4]);
+
+    if (changed) onDraft(next);
+  });
+
   return (
     <div className="bg" style={{ flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
       <Dropdown
@@ -199,12 +287,16 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
         style={{ padding: '1em 0' }}
       />
 
-      <div className="bg" style={{ flex: 1, minHeight: 0 }}>
-        {LAYERS.map(({ mode, label }) => {
+      <div ref={columnsRef} className="bg" style={{ flex: 1, minHeight: 0 }}>
+        {LAYERS.map(({ mode, label }, index) => {
           const available = modeIsAvailable(tables, mode);
           const on = available && draft.active[mode];
           return (
-            <div key={mode} className="bg" style={{ flexDirection: 'column', flex: 1, minWidth: 0 }}>
+            <div
+              key={mode}
+              className="bg"
+              style={{ flexDirection: 'column', ...columnStyle(index), minWidth: 0 }}
+            >
               {/* Off, or not loaded, is said with the label's color alone --
                   no extra "(off)" text. Changing the text would change what
                   squeezeFg has to fit, so every toggle would resize every
@@ -241,19 +333,72 @@ export default function MapPanel({ tables, draft, onDraft, legends, flowLegend, 
         })}
       </div>
 
-      <div className="bg" style={{ padding: '1em' }}>
-        <input
-          type="range"
-          min={0}
-          max={1}
-          // No quantization: a native slider is already bounded to one
-          // distinct position per pixel of its own track, so a numeric step
-          // could only ever make that coarser, never finer.
-          step="any"
-          value={detail}
-          onChange={event => onDetail(Number(event.target.value))}
-          style={{ width: '100%', accentColor: rgbStr(slider) }}
-        />
+      {/* One slider per layer, not one shared control -- each row is a
+          label exactly as wide as the first column above it, next to a
+          slider filling the rest, stacked in the same LAYERS order those
+          columns use.
+
+          The label takes that column's own measured width outright rather
+          than a 1:3 flex ratio. A ratio had to reproduce the column split
+          by arithmetic -- and the two rows carry different numbers of 1px
+          gaps, three against one, so the shares genuinely differ and it
+          needed a flex-basis fudge to compensate. Reusing the number the
+          columns were actually laid out with removes the arithmetic and the
+          fudge together.
+
+          Neither cell carries horizontal padding: box-sizing is border-box
+          here, so padding would become the cell's own flex base size and
+          eat into the split rather than insetting anything. The slider's
+          own inset lives on the input, as a margin. */}
+      <div className="bg" style={{ flexDirection: 'column' }}>
+        {LAYERS.map(({ mode, label }) => (
+          <div key={mode} className="bg" style={{ flexDirection: 'row' }}>
+            <div className="bg" style={{ ...columnStyle(0), padding: '1em 0' }}>
+              <div className="fg">{humanize(label)}</div>
+            </div>
+            <div className="bg" style={{ flex: 1, minWidth: 0, padding: '1em 0' }}>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                // No quantization: a native slider is already bounded to one
+                // distinct position per pixel of its own track, so a numeric
+                // step could only ever make that coarser, never finer.
+                step="any"
+                value={detail[mode]}
+                onChange={event => onDetail(mode, Number(event.target.value))}
+                // The 1em inset lives here, on the input, rather than as
+                // horizontal padding on the cell around it -- padding there
+                // would become the cell's flex base size and eat a quarter
+                // of itself out of the label beside it, which is the
+                // alignment bug described above. A margin on a flex item
+                // takes its space out of the cell's own share instead, so
+                // the 1:3 split is untouched.
+                style={{ flex: 1, minWidth: 0, margin: '0 1em', accentColor: rgbStr(slider) }}
+              />
+            </div>
+          </div>
+        ))}
+
+        {/* One more row, same shape as the four above it -- not a fifth
+            layer, so it isn't in LAYERS, but it takes the same first-column
+            width so its slider starts where theirs do. */}
+        <div className="bg" style={{ flexDirection: 'row' }}>
+          <div className="bg" style={{ ...columnStyle(0), padding: '1em 0' }}>
+            <div className="fg">Lines</div>
+          </div>
+          <div className="bg" style={{ flex: 1, minWidth: 0, padding: '1em 0' }}>
+            <input
+              type="range"
+              min={0}
+              max={MAX_LINE_WIDTH}
+              step="any"
+              value={lineWidth}
+              onChange={event => onLineWidth(Number(event.target.value))}
+              style={{ flex: 1, minWidth: 0, margin: '0 1em', accentColor: rgbStr(slider) }}
+            />
+          </div>
+        </div>
       </div>
     </div>
   );

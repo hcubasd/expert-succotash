@@ -40,13 +40,17 @@ describe('consolidateDesireLines', () => {
     expect(Array.from(flow.quantities)).toEqual([3, 4]);
   });
 
-  it('sums lines that end up between the same pair of buckets', () => {
-    // Two parallel lines between the same two places, merged by a radius
-    // big enough to pull each pair of ends together.
+  it('keeps lines apart even when they end up between the same pair of points', () => {
+    // Two parallel lines between the same two places, with a radius big
+    // enough to pull each pair of ends together. Collapsing eliminates
+    // lines, it never adds them up: both survive carrying their own
+    // quantity, rather than becoming one line holding a 7 that no desire
+    // line in the data has. The renderer still accumulates them where they
+    // overlap -- that is compositing, not the geometry inventing a number.
     const parallel = lines(0, 0, 100, 0, 1, 1, 101, 1);
     const flow = consolidateDesireLines(parallel, flows(2, 5), WIDE, 10);
-    expect(flow.quantities.length).toBe(1);
-    expect(flow.quantities[0]).toBe(7);
+    expect(flow.quantities.length).toBe(2);
+    expect(Array.from(flow.quantities).sort((a, b) => a - b)).toEqual([2, 5]);
   });
 
   it('drops a line whose two ends land in the same bucket', () => {

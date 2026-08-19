@@ -1,3 +1,4 @@
+import { MAP_RAMP_LENGTH } from '../lib/colors';
 import type { RgbColor } from '../lib/colors';
 import { binnedCdf } from '../lib/equalize';
 import {
@@ -181,7 +182,7 @@ export class MapRenderer {
     this.flowJointVao = gl.createVertexArray()!;
 
     this.cdfTexture = this.makeLookup(gl.R32F, CDF_BINS);
-    this.rampTexture = this.makeLookup(gl.RGBA8, 128);
+    this.rampTexture = this.makeLookup(gl.RGBA8, MAP_RAMP_LENGTH);
   }
 
   get supportsFlow(): boolean {
@@ -558,7 +559,7 @@ export class MapRenderer {
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, CDF_BINS, 1, gl.RED, gl.FLOAT, cdf);
     this.checkError('cdf upload');
 
-    const rampPixels = new Uint8Array(128 * 4);
+    const rampPixels = new Uint8Array(MAP_RAMP_LENGTH * 4);
     layer.ramp.forEach((c, i) => {
       rampPixels[i * 4] = c.r;
       rampPixels[i * 4 + 1] = c.g;
@@ -566,7 +567,7 @@ export class MapRenderer {
       rampPixels[i * 4 + 3] = 255;
     });
     gl.bindTexture(gl.TEXTURE_2D, this.rampTexture);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 128, 1, gl.RGBA, gl.UNSIGNED_BYTE, rampPixels);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, MAP_RAMP_LENGTH, 1, gl.RGBA, gl.UNSIGNED_BYTE, rampPixels);
     this.checkError('ramp upload');
 
     // Resolve onto the scene, blended so partially covered edges soften into

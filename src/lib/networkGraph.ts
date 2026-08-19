@@ -179,12 +179,6 @@ export type VirtualNetwork = {
   endpointNode: Int32Array;
 };
 
-// How several real links collapse into one virtual edge. Vehicle counts and
-// emitted grams are quantities that add up, so the frontier's total is the
-// sum; grade is a property of the road itself, so it averages -- weighted by
-// length, since a long climb should not count the same as a short one.
-export type Aggregation = 'sum' | 'mean';
-
 // The nodes and links a view actually needs to look at: whichever links have
 // at least one endpoint on screen, and the nodes those links touch.
 function visibleCandidates(graph: NodeGraph, viewport: Bounds) {
@@ -225,53 +219,49 @@ function buildVirtualNetwork(
   values: Float64Array,
   visibleLink: Uint8Array,
   owner: Uint32Array,
-  aggregation: Aggregation,
 ): VirtualNetwork {
   const { nodeX, nodeY, linkA, linkB, linkCount } = graph;
 
-  type Edge = { sum: number; weight: number; a: number; b: number; count: number; link: number };
-  const totals = new Map<number, Edge>();
+  // One entry per surviving link, never a merge of several. Collapsing is
+  // elimination: a link whose two endpoints land on the same point dies
+  // outright (below), and every link that outlives that keeps its own value
+  // untouched. Two survivors that happen to span the same pair of hubs stay
+  // two links drawn on top of each other, not one link holding their total
+  // -- summing them would put a number on screen that no road in the data
+  // has, which is the same flaw that made the agent layer's values depend
+  // on how far you were zoomed out. Aggregation belongs to the selection
+  // (summing a stratum you asked to sum), never to the geometry.
+  type Edge = { value: number; a: number; b: number; link: number };
+  const edges: Edge[] = [];
 
   for (let l = 0; l < linkCount; l++) {
     if (!visibleLink[l]) continue;
     const ownerA = owner[linkA[l]];
     const ownerB = owner[linkB[l]];
     // Unowned means the link sits in a component no hub reached -- 0.06% of
-    // the real network, in tiny islands off the main graph.
+    // the real network, in tiny islands off the main graph. Same owner on
+    // both ends means the link collapsed to a point: it is gone, and its
+    // load and emissions go with it rather than moving anywhere else.
     if (ownerA === NONE || ownerB === NONE || ownerA === ownerB) continue;
 
-    const value = values[graph.linkRow[l]];
-    if (!Number.isFinite(value)) continue;
-
-    const low = Math.min(ownerA, ownerB);
-    const high = Math.max(ownerA, ownerB);
-    const key = low * graph.nodeCount + high;
-    const weight = aggregation === 'mean' ? Math.max(graph.linkLength[l], 1e-9) : 1;
-
-    const entry = totals.get(key);
-    if (entry) {
-      entry.sum += value * weight;
-      entry.weight += weight;
-      entry.count++;
-    } else {
-      totals.set(key, { sum: value * weight, weight, a: low, b: high, count: 1, link: l });
-    }
+    // A link with no value for the current selection still gets drawn -- the
+    // road is there whether or not any traffic was recorded on it. NaN
+    // carries that through to the caller, which paints it as structure.
+    edges.push({ value: values[graph.linkRow[l]], a: ownerA, b: ownerB, link: l });
   }
 
-  // An edge that aggregates a single link whose own endpoints are the two
-  // hubs *is* that link, so it draws the road rather than a chord across it.
-  // The condition tightens on its own as the radius shrinks -- more hubs
-  // means more links standing alone between two of them -- so detail arrives
-  // continuously, and at radius zero every link qualifies and the original
-  // geometry is back. Both halves must hold: a lone link on a frontier far
-  // from either hub would otherwise draw as a stub floating in the gap.
+  // A link whose own endpoints both survived as themselves draws its real
+  // road shape; one with an endpoint that moved draws a straight chord to
+  // wherever that endpoint went. The condition loosens on its own as the
+  // radius shrinks -- more surviving points means more links standing on
+  // their own ends -- so detail arrives continuously, and at radius zero
+  // every link qualifies and the original geometry is back.
   const drawsRealShape = (edge: Edge): boolean =>
-    edge.count === 1 &&
     owner[linkA[edge.link]] === linkA[edge.link] &&
     owner[linkB[edge.link]] === linkB[edge.link];
 
   let segmentTotal = 0;
-  for (const edge of totals.values()) {
+  for (const edge of edges) {
     segmentTotal += drawsRealShape(edge)
       ? graph.linkLastSegment[edge.link] - graph.linkFirstSegment[edge.link] + 1
       : 1;
@@ -282,8 +272,8 @@ function buildVirtualNetwork(
   const endpointNode = new Int32Array(segmentTotal * 2);
   let at = 0;
 
-  for (const edge of totals.values()) {
-    const value = aggregation === 'mean' ? edge.sum / edge.weight : edge.sum;
+  for (const edge of edges) {
+    const value = edge.value;
 
     if (drawsRealShape(edge)) {
       const first = graph.linkFirstSegment[edge.link];
@@ -325,7 +315,6 @@ export function simplifyNetwork(
   values: Float64Array,
   viewport: Bounds,
   exclusion: number,
-  aggregation: Aggregation,
 ): VirtualNetwork {
   const { nodeX, nodeY } = graph;
   const { candidates, visibleLink } = visibleCandidates(graph, viewport);
@@ -342,5 +331,5 @@ export function simplifyNetwork(
   const owner = new Uint32Array(graph.nodeCount).fill(NONE);
   for (let k = 0; k < candidates.length; k++) owner[candidates[k]] = owners[k];
 
-  return buildVirtualNetwork(graph, values, visibleLink, owner, aggregation);
+  return buildVirtualNetwork(graph, values, visibleLink, owner);
 }

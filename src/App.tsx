@@ -9,8 +9,11 @@ import {
   originOf, rawBounds,
 } from './lib/geometryMaker';
 import type { Geometries, Origin } from './lib/geometryMaker';
+import type { View as MapView } from './gl/renderer';
+import { rerollMapPalette } from './lib/colors';
+import { DEFAULT_DETAIL_BY_MODE, LINE_WIDTH_CSS_PX } from './lib/mapScene';
 import { DEFAULT_ACTIVE, stratumValues, valueNumbers } from './lib/mapValues';
-import type { Draft } from './lib/mapValues';
+import type { Draft, MapMode } from './lib/mapValues';
 import type { RawGeometry, RawTable } from './lib/rawTable';
 import { FILENAME, REQUIRED_COLUMNS } from './lib/schema';
 import type { TableName } from './lib/schema';
@@ -34,6 +37,20 @@ export default function App() {
   const [activeColumn, setActiveColumn] = useState<ActiveColumn | null>(null);
   const [geometries, setGeometries] = useState<Geometries>(emptyGeometries);
   const [draft, setDraft] = useState<Draft>({ active: DEFAULT_ACTIVE });
+  // How the map is being *looked at*, kept here rather than inside Map so it
+  // survives the trip to a table and back. The draft already lived here, so
+  // the panel's own selections always persisted; the camera and the detail
+  // sliders did not, and coming back to a reset view was losing your place.
+  const [detail, setDetail] = useState<Record<MapMode, number>>(DEFAULT_DETAIL_BY_MODE);
+  // Same reasoning, same persistence: a line-width slider only reads as a
+  // real control if it stays put across a trip to the diagram or a table,
+  // the same as the camera and the detail sliders beside it.
+  const [lineWidth, setLineWidth] = useState(LINE_WIDTH_CSS_PX);
+  // A ref, not state: nothing here re-renders App, and the camera changes on
+  // every pan and zoom. Tagged with the geometries it was framed against, so
+  // loading a new file still refits instead of restoring a view of data that
+  // is no longer on screen.
+  const cameraRef = useRef<{ geometries: Geometries; view: MapView; history: MapView[] } | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const pendingTable = useRef<TableName | null>(null);
@@ -41,6 +58,14 @@ export default function App() {
   // after it, so all buckets share one frame. See geometryMaker: this is what
   // keeps float32 vertex buffers precise for real projected coordinates.
   const originRef = useRef<Origin | null>(null);
+  // The first geometry file's own gpkg_contents.srs_id, kept only to compare
+  // against -- never resolved into a real projection or converted into
+  // anything. This app has no way to reconcile two files in different real
+  // units (that needs the CRS-and-reprojection machinery urban-dollop's own
+  // synth pipeline now requires at the source), so the only thing worth
+  // doing here is refusing to silently overlay files that don't even claim
+  // to agree, and pointing at the file that broke agreement.
+  const srsRef = useRef<{ id: number | null; file: string } | null>(null);
 
   const loaded = useMemo(() => new Set(Object.keys(tables) as TableName[]), [tables]);
 
@@ -58,11 +83,13 @@ export default function App() {
 
       let raw: RawTable;
       let rawGeometries: RawGeometry[] | null = null;
+      let srsId: number | null = null;
 
       if (FILENAME[target].endsWith('.gpkg')) {
         const parsed = await loadGpkg(await file.arrayBuffer());
         raw = parsed;
         rawGeometries = parsed.geometries;
+        srsId = parsed.srsId;
       } else {
         raw = loadCsv(await file.text());
       }
@@ -71,6 +98,26 @@ export default function App() {
       if (missing.length > 0) {
         window.alert(`${file.name} is missing required column(s): ${missing.join(', ')}.`);
         return;
+      }
+
+      // Every geometry file has to agree on the same srs_id as the first one
+      // loaded, or overlaying them is meaningless -- there is no reprojection
+      // here to reconcile two that don't. Two files can both carry the exact
+      // same id and still not be in real, meaningful units (an "undefined"
+      // placeholder id matching itself is not a real CRS agreeing with
+      // itself), so this can't promise the map is *correct* -- only that it
+      // refuses to silently draw two files that don't even claim to match.
+      if (rawGeometries) {
+        if (!srsRef.current) {
+          srsRef.current = { id: srsId, file: FILENAME[target] };
+        } else if (srsRef.current.id !== srsId) {
+          window.alert(
+            `${file.name}'s coordinate reference (srs_id ${srsId ?? 'none'}) doesn't match `
+            + `${srsRef.current.file}'s (srs_id ${srsRef.current.id ?? 'none'}). `
+            + 'Loading it anyway would overlay two files that are not known to share the same units.',
+          );
+          return;
+        }
       }
 
       const table = makeTable(target, raw);
@@ -103,6 +150,14 @@ export default function App() {
       // highlight, so the selection can't survive it.
       const nextSelection = activeColumn?.table === target ? null : activeColumn;
 
+      // A new file can change how many resources exist, and the resource
+      // n-gon that spaces every map ramp is built from that count -- so the
+      // ramps are being respaced regardless. Redrawing which vertex counts
+      // as first here rather than leaving it fixed for the page's life is
+      // what makes the palette vary between sessions instead of being
+      // decided once, and this is the only moment it can change anything.
+      rerollMapPalette();
+
       setTables(nextTables);
       setGeometries(nextGeometries);
       setActiveColumn(nextSelection);
@@ -127,6 +182,7 @@ export default function App() {
 
   function clearAll() {
     originRef.current = null;
+    srsRef.current = null;
     setTables({});
     setGeometries(emptyGeometries());
     setActiveColumn(null);
@@ -169,6 +225,11 @@ export default function App() {
           geometries={geometries}
           draft={draft}
           onDraft={setDraft}
+          detail={detail}
+          onDetail={setDetail}
+          lineWidth={lineWidth}
+          onLineWidth={setLineWidth}
+          camera={cameraRef}
           onDiagram={() => setView({ kind: 'diagram' })}
         />
       </>

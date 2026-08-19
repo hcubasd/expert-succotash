@@ -18,10 +18,18 @@ export const LUMINANCE = 0.73912;
 
 const WHEEL = 256;
 
-// A ramp walks half the wheel. Half rather than the full circle so a ramp's
-// two ends stay distinguishable: all the way round would put the minimum and
-// maximum on the same hue.
+// A table ramp walks half the wheel. Half rather than the full circle so a
+// ramp's two ends stay distinguishable: all the way round would put the
+// minimum and maximum on the same hue. The table view still colours one
+// column at a time, so nothing there has to share the wheel with anything.
 export const RAMP_LENGTH = WHEEL / 2;
+
+// The map is the opposite case: four layers are on screen at once, so they
+// divide the wheel between them rather than each taking half of it. A
+// quarter each means no colour appears in two layers' ramps, so a hue read
+// off the map belongs to exactly one layer without consulting a legend.
+export const MAP_LAYERS = 4;
+export const MAP_RAMP_LENGTH = WHEEL / MAP_LAYERS;
 
 export function rgbStr({ r, g, b }: RgbColor) {
   return `rgb(${r},${g},${b})`;
@@ -96,19 +104,45 @@ export function ngonStarts(n: number): number[] {
   return ngon(n, SESSION_ROTATION).map(wheelIndexOf);
 }
 
-// One ramp per resource: n evenly spaced starting hues from the n-gon, each
-// walked half way round the wheel. Two resources therefore start as far
-// apart as the wheel allows and their ramps stay tellable apart along their
-// whole length, which is what lets a per-resource view be read on its own
-// terms without a shared legend.
-let rampsCache: { n: number; ramps: RgbColor[][] } | null = null;
+// Which vertex of the resource n-gon counts as the first one. An n-gon has
+// no inherent first vertex, so the choice is free -- kept as a fraction
+// rather than an index because the resource count changes underneath it as
+// files load, and a fraction stays meaningful against any n.
+//
+// Redrawn per file load rather than per page load: loading a file is what
+// can change the resource count, and the n-gon it indexes into is a
+// different shape once it does.
+let paletteDraw = Math.random();
 
-export function ramps(n: number): RgbColor[][] {
-  if (rampsCache && rampsCache.n === n) return rampsCache.ramps;
-  // Cached on n alone: the session rotation is fixed for the page's life.
-  const built = ngonStarts(n).map(semicircle);
-  rampsCache = { n, ramps: built };
-  return built;
+export function rerollMapPalette(): void {
+  paletteDraw = Math.random();
+}
+
+// One quarter of the wheel, starting `layer` quarters past a given vertex.
+// Layers are handed 0..3, so the four ramps tile the wheel exactly once and
+// share no colour between them however the start is rotated.
+export function quarterFrom(start: number, layer: number): RgbColor[] {
+  const w = wheel();
+  const begin = (((start + layer * MAP_RAMP_LENGTH) % WHEEL) + WHEEL) % WHEEL;
+  const ramp: RgbColor[] = [];
+  for (let k = 0; k < MAP_RAMP_LENGTH; k++) ramp.push(w[(begin + k) % WHEEL]);
+  return ramp;
+}
+
+// The ramp a layer draws a given resource in.
+//
+// The resource n-gon supplies the rotations: n resources means n evenly
+// spaced starting vertices, so two resources put all four of their ramps as
+// far from each other as the wheel allows. The layer then picks its quarter
+// off that start. Rotating the start moves all four quarters together, which
+// is what keeps them disjoint at every rotation -- a resource changes which
+// hues each layer uses, never whether two layers can collide.
+export function mapRamp(layer: number, resourceIndex: number, resourceCount: number): RgbColor[] {
+  const n = Math.max(1, resourceCount);
+  const starts = ngonStarts(n);
+  const offset = Math.floor(paletteDraw * n) % n;
+  const at = resourceIndex < 0 ? 0 : resourceIndex;
+  return quarterFrom(starts[(at + offset) % n], layer);
 }
 
 // Map normalized [0,1] onto a ramp: 0 lands on the first stop, 1 on the last.

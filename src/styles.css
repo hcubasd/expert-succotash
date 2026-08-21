@@ -60,15 +60,21 @@ body {
   background: rgba(128, 128, 128, 0.95);
 }
 
-/* No background, body font size, floating over the canvas at a 1em margin:
-   the map/diagram/table canvas navigation words (Diagram, Back, Map,
-   Clear), deliberately plainer than overlay-btn's chip look. */
+/* Floating over the canvas at a 1em margin: the map/diagram/table
+   navigation words (Diagram, Back, Map, Clear, reset view). A faint white
+   tint, not a real fill color -- low enough alpha that it reads as frosted
+   glass over whatever's underneath rather than as a colored chip -- layered
+   on the backdrop-filter blur, not standing in for it. -webkit- prefix is
+   still required for Safari's backdrop blur support. */
 .word-btn {
   position: fixed;
   border: none;
-  background: none;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 2em;
   cursor: pointer;
-  padding: 0;
+  padding: 1em;
   font-family: inherit;
   /* Not 1em: these are children of roots whose font size gets squeezed to
      fit content, and the buttons should read the same in every view. */
@@ -80,6 +86,28 @@ body {
 
 .word-btn:hover {
   opacity: 0.6;
+}
+
+/* Forces a grabbing cursor everywhere while a pan or column-reorder drag is
+   active, overriding whatever cursor an individual hovered element would
+   otherwise show on its own -- a header cell or button's own inline
+   cursor:pointer normally wins over anything an ancestor declares, since
+   inheritance only kicks in when the descendant hasn't set its own value.
+   Only a stylesheet rule marked !important beats that regardless of what's
+   underneath. Toggled on <body> imperatively by whichever drag is in
+   progress (Diagram's pan, Table's column reorder) once it's confirmed to
+   be a real drag, not a plain click -- see MIN_DRAG_PX in both.
+
+   user-select:none rides along for the same reason: dragging over a label
+   is otherwise indistinguishable from the browser's own "select this text"
+   gesture. Each drag's own pointerdown already calls preventDefault to stop
+   that gesture from starting in the first place, for the few pixels before
+   MIN_DRAG_PX confirms a real drag and this class engages -- this is what
+   covers the rest of it. */
+body.dragging-pointer,
+body.dragging-pointer * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 
 /* The dropdown popup's own list: nothing else in this UI shows a native

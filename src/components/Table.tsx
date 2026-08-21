@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { colorBg, squeezeFg } from 'psychic-potato';
+import { colorBg } from 'psychic-potato';
 import { LUMINANCE, gradientAt, indexColor, ngon, rgbStr, semicircle } from '../lib/colors';
 import { equalize } from '../lib/equalize';
 import { humanize } from '../lib/humanize';
@@ -23,6 +23,12 @@ type Props = {
 // Past this, columns stop shrinking and the table scrolls horizontally rather
 // than squeezing text into slivers.
 const MIN_COL_WIDTH = 256;
+// The font never shrinks below a floor that's still legible at this font
+// stack -- below it, columns widen to fit their content instead of text
+// keeps shrinking to fit the columns -- see fitFont. The ceiling is body
+// size itself (read live off the CSS variable there, not duplicated as a
+// constant here): a headline-sized table reads as wrong, not as generous.
+const MIN_FONT_SIZE = 11;
 // No row height is fixed any more: every cell gets 1em top/bottom padding,
 // and the column width is what actually drives font size through squeezeFg
 // -- height just hugs whatever that settles on. Without a fixed pixel to
@@ -46,12 +52,16 @@ const ALL: Option = { value: 'all', label: 'All' };
 
 type Cell = { text: string; fill?: string; onClick?: () => void; italic?: boolean };
 
-function CellBox({ cell, width, dragProps, stickyTop }: {
+function CellBox({ cell, width, padding, dragProps, stickyTop }: {
   cell: Cell;
   width: number;
+  // Top/bottom only ('1em 0') at the natural column width, matching or
+  // exceeding sides too ('1em 1em') once fitFont has widened columns to fit
+  // content -- see Table's own columnPadding for which and why.
+  padding: string;
   dragProps?: Pick<
     React.HTMLAttributes<HTMLDivElement>,
-    'onPointerDown' | 'onPointerMove' | 'onPointerUp' | 'onClickCapture'
+    'onPointerDown' | 'onClickCapture'
   > & { 'data-column-name'?: string };
   // The *text* sticks, never the box around it. The box is the group's
   // swatch: it has to keep its full height so the colors still read as
@@ -62,11 +72,7 @@ function CellBox({ cell, width, dragProps, stickyTop }: {
   stickyTop?: string;
 }) {
   // Every swatch is drawn at the one palette luminance, which is bright, so
-  // black is always the readable ink over a filled cell. Padding is
-  // top/bottom only: the column's width is what constrains squeezeFg, so
-  // padding the sides too would just be one more thing eating into the
-  // budget that fit is measured against, for no benefit -- the row's
-  // height, not its width, is what this padding is actually shaping.
+  // black is always the readable ink over a filled cell.
   //
   // A fixed pixel width, not a flex share: every leaf cell in the table --
   // header or body, whatever stratum depth it sits at -- takes the exact
@@ -86,7 +92,7 @@ function CellBox({ cell, width, dragProps, stickyTop }: {
       style={{
         flex: '0 0 auto', width, cursor: cell.onClick ? 'pointer' : undefined,
         fontStyle: cell.italic ? 'italic' : undefined,
-        padding: '1em 0',
+        padding,
       }}
       onClick={cell.onClick}
       {...dragProps}
@@ -111,56 +117,135 @@ function CellBox({ cell, width, dragProps, stickyTop }: {
 }
 
 // Click-vs-drag for a header cell: pointerdown starts tracking, a move past
-// the threshold marks it a drag, and a capture-phase click handler swallows
-// the click that would otherwise follow a real drag -- the same trick
-// works whether the cell underneath is a plain CellBox or a MapCard, since
+// the threshold marks it a drag and reorders live as the pointer crosses
+// into other columns' cells, and a capture-phase click handler swallows the
+// click that would otherwise follow a real drag -- the same trick works
+// whether the cell underneath is a plain CellBox or a MapCard, since
 // neither needs to know a drag was even a possibility.
+//
+// Deliberately window listeners rather than setPointerCapture, and the
+// dragged column is snapshotted at pointerdown rather than read from props
+// as the drag runs. Both are forced by the same thing: this drag *reorders
+// the very elements it is being tracked against*, so neither the captured
+// node nor this hook's own `columnName` prop still means what it did when
+// the gesture started.
+//
+//   - Capture doesn't survive it. Value headers are keyed by column name,
+//     so a reorder makes React *move* their DOM nodes; moving a node
+//     detaches it, and detaching a node implicitly releases pointer
+//     capture. Every later pointermove then goes to whatever is under the
+//     cursor instead, and the drag silently dies mid-gesture.
+//   - The prop doesn't survive it either. Stratum headers are rendered by
+//     the recursive renderHeader, unkeyed, so their instances are bound to
+//     *slots*, not columns: after a swap, the same instance (and the same
+//     DOM node) is showing a different column, and `columnName` has changed
+//     under the running gesture. Reading it per move makes the drag
+//     re-identify itself as whichever column just moved in and start
+//     dragging that one instead.
+//
+// Window listeners see every move regardless of what the DOM did, and the
+// snapshot keeps "which column am I dragging" answerable from the gesture
+// itself rather than from a tree that is being rearranged underneath it.
 function useColumnDrag(columnName: string, onReorder: (from: string, to: string) => void) {
-  const state = useRef<{ x0: number; y0: number; dragging: boolean } | null>(null);
+  type Drag = { x0: number; y0: number; column: string; dragging: boolean; lastHovered: string | null };
+  const state = useRef<Drag | null>(null);
+  // Separate from `state`, and deliberately not cleared until the click
+  // that follows a real drag has been swallowed: pointerup and the click it
+  // triggers are two separate browser events firing back to back, so if
+  // this lived on `state` (nulled the instant the pointer lifts) the
+  // capture-phase click handler below would always find nothing there by
+  // the time it ran -- which is exactly why dropping a drag used to still
+  // fire a click.
+  const justDraggedRef = useRef(false);
+  // The listeners below are installed once per gesture and outlive the
+  // render that installed them, so they have to reach the *current*
+  // onReorder rather than the one captured in that render's closure.
+  const reorderRef = useRef(onReorder);
+  reorderRef.current = onReorder;
+  const teardownRef = useRef<(() => void) | null>(null);
+
+  // Unmounting mid-drag (Clear navigating away with a pointer still down)
+  // would otherwise leave both the window listeners and the forced cursor
+  // behind on whatever view comes next.
+  useEffect(() => () => {
+    teardownRef.current?.();
+    document.body.classList.remove('dragging-pointer');
+  }, []);
 
   const onPointerDown = (event: React.PointerEvent) => {
+    if (event.button !== 0) return;
     // A React portal is a child of its host in the *React* tree even though
     // it lives at document.body in the DOM, so an open dropdown's popup
-    // bubbles its events straight into this header's handlers. Capturing on
-    // one of those would pin the pointer to the header and hand the
-    // following click to it instead of to the option the user pressed --
-    // which is to say, the dropdown would stop selecting anything at all.
-    // A DOM containment check is exactly the line the React tree blurs.
+    // bubbles its events straight into this header's handlers. Starting a
+    // drag from one would reorder columns when the user meant to pick an
+    // option. A DOM containment check is exactly the line the React tree
+    // blurs.
     if (!event.currentTarget.contains(event.target as Node)) return;
-    state.current = { x0: event.clientX, y0: event.clientY, dragging: false };
-    // Without this, dragging past this cell's own edge hands pointermove
-    // and pointerup to whatever element the cursor is now over instead --
-    // so releasing over the drop target fires *its* onPointerUp, which has
-    // no drag state of its own and does nothing, while this cell's own
-    // onPointerUp (holding the state the reorder actually needs) never
-    // fires at all. Capturing keeps every event routed back here regardless
-    // of where the pointer physically ends up; elementFromPoint in
-    // onPointerUp still finds the real drop target underneath it.
-    event.currentTarget.setPointerCapture(event.pointerId);
-  };
-  const onPointerMove = (event: React.PointerEvent) => {
-    const s = state.current;
-    if (!s || s.dragging) return;
-    if (Math.abs(event.clientX - s.x0) >= MIN_DRAG_PX || Math.abs(event.clientY - s.y0) >= MIN_DRAG_PX) {
-      s.dragging = true;
-    }
-  };
-  const onPointerUp = (event: React.PointerEvent) => {
-    const s = state.current;
-    state.current = null;
-    if (!s?.dragging) return;
-    const under = document.elementFromPoint(event.clientX, event.clientY);
-    const to = under?.closest<HTMLElement>('[data-column-name]')?.dataset.columnName;
-    if (to && to !== columnName) onReorder(columnName, to);
+    justDraggedRef.current = false;
+    state.current = { x0: event.clientX, y0: event.clientY, column: columnName, dragging: false, lastHovered: null };
+    // Stops the browser's own text-selection drag from starting: a header
+    // is plain text, and holding the pointer down and moving it is exactly
+    // the native "select this text" gesture unless something says
+    // otherwise. dragging-pointer (styles.css) forces user-select:none too,
+    // but only once the threshold is crossed -- this covers the few pixels
+    // before that.
+    event.preventDefault();
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const s = state.current;
+      if (!s) return;
+      if (!s.dragging) {
+        if (Math.abs(moveEvent.clientX - s.x0) < MIN_DRAG_PX && Math.abs(moveEvent.clientY - s.y0) < MIN_DRAG_PX) return;
+        s.dragging = true;
+        document.body.classList.add('dragging-pointer');
+      }
+      // Live reorder: whichever column is under the pointer swaps into the
+      // dragged column's slot immediately, not just once on release.
+      //
+      // Acting only when the hovered column *changes* is what keeps this
+      // stable, and it has to be the last observed value rather than the
+      // last swapped one. elementFromPoint reads what is on screen right
+      // now, which is still the pre-swap layout when a second pointermove
+      // arrives before React has repainted the first -- so the same target
+      // gets read twice, and since reorderColumns is a plain swap, applying
+      // it twice puts everything back where it started. That was the
+      // flicker. Tracking every observed value (not just swapped ones) also
+      // keeps a drag back the way it came working: the column being
+      // returned to is no longer permanently suppressed by having been
+      // swapped with earlier in the same gesture.
+      const under = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+      const hovered = under?.closest<HTMLElement>('[data-column-name]')?.dataset.columnName ?? null;
+      if (hovered !== s.lastHovered) {
+        s.lastHovered = hovered;
+        if (hovered && hovered !== s.column) reorderRef.current(s.column, hovered);
+      }
+    };
+    const finish = () => {
+      const s = state.current;
+      state.current = null;
+      if (s?.dragging) justDraggedRef.current = true;
+      document.body.classList.remove('dragging-pointer');
+      teardown();
+    };
+    const teardown = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      teardownRef.current = null;
+    };
+    teardownRef.current = teardown;
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
   };
   const onClickCapture = (event: React.MouseEvent) => {
-    if (state.current?.dragging) {
-      event.stopPropagation();
-      event.preventDefault();
-    }
+    if (!justDraggedRef.current) return;
+    justDraggedRef.current = false;
+    event.stopPropagation();
+    event.preventDefault();
   };
 
-  return { onPointerDown, onPointerMove, onPointerUp, onClickCapture, 'data-column-name': columnName };
+  return { onPointerDown, onClickCapture, 'data-column-name': columnName };
 }
 
 export default function Table({ table, activeColumn, onSelectColumn, onBack, onClear }: Props) {
@@ -182,6 +267,11 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
   // layout-effect pass before paint -- the same pattern the map's own
   // measured sizing uses.
   const [wrapperWidth, setWrapperWidth] = useState(0);
+  // 0 means "no override" -- columns sit at their natural, wrapper-derived
+  // width. Set only when fitFont finds that width can't hold MIN_FONT_SIZE
+  // for even the widest header label; cleared the moment it can again. See
+  // fitFont for why this never needs to be reconciled against a stale value.
+  const [minColumnWidth, setMinColumnWidth] = useState(0);
 
   const lit = activeColumn && activeColumn.table === table.name ? activeColumn.column : null;
 
@@ -307,10 +397,19 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
   // summation might not reproduce.
   const totalColumns = strata.length + values.length;
   const totalGaps = Math.max(0, totalColumns - 1);
-  const columnWidth = totalColumns > 0
+  const naturalColumnWidth = totalColumns > 0
     ? Math.max(MIN_COL_WIDTH, Math.floor((wrapperWidth - totalGaps) / totalColumns))
     : MIN_COL_WIDTH;
+  // minColumnWidth only ever raises this floor further -- fitFont sets it
+  // once naturalColumnWidth can't hold MIN_FONT_SIZE even for the widest
+  // header label, and every column widens together, not just the offender.
+  const columnWidth = Math.max(naturalColumnWidth, minColumnWidth);
   const tableWidth = totalColumns * columnWidth + totalGaps;
+  // Horizontal padding only exists once width is fitting content rather
+  // than the other way around -- at the natural width, the side padding
+  // would just be one more thing eating into the budget squeeze measures
+  // against, for no benefit (see CellBox).
+  const columnPadding = minColumnWidth > 0 ? '1em 1em' : '1em 0';
 
   function toggleFilter(column: StratumColumn, code: number) {
     setFilters(previous => {
@@ -366,11 +465,34 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
       if (values.length === 0) return null;
       return (
         <div ref={rowRef} className="bg" style={rowStyle}>
-          {values.map(column => (
+          {/* Keyed by slot, not by column name, and that is deliberate --
+              the one case where the usual "never key a list by index"
+              advice gives the wrong answer.
+
+              Keying by name makes a reorder *move* these DOM nodes, and
+              moving a node detaches and reinserts it. Doing that to the
+              node a pointer is currently down on ends the gesture: it is
+              what was silently releasing pointer capture before, and even
+              with capture gone WebKit still fires pointercancel for it,
+              which is exactly the drag dying mid-motion. Keying by slot
+              instead leaves every node exactly where it is and updates its
+              contents in place, so nothing under the pointer is ever
+              detached -- the same thing the recursive stratum headers do
+              positionally, which is why those drag cleanly.
+
+              Nothing here is lost by it: these cells hold no state of
+              their own that has to follow a particular column. The drag
+              snapshots which column it grabbed at pointerdown (see
+              useColumnDrag) rather than reading it from props as it runs,
+              and hover targets are read live off data-column-name in the
+              DOM, so both sides of the gesture stay correct while the
+              instances themselves stay put. */}
+          {values.map((column, slot) => (
             <DraggableValueHeaderCell
-              key={column.name}
+              key={slot}
               column={column}
               columnWidth={columnWidth}
+              columnPadding={columnPadding}
               onSelect={() => onSelectColumn(column.name)}
               onReorder={reorderColumns}
             />
@@ -385,6 +507,7 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
         <ReorderableStratumHeader
           column={first}
           columnWidth={columnWidth}
+          columnPadding={columnPadding}
           options={stratumOptionsOf.get(first.name) ?? [ALL]}
           selected={filtered !== undefined ? String(filtered) : 'all'}
           onSelect={value => setFilterFromDropdown(first, value)}
@@ -416,6 +539,7 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
                 <CellBox
                   key={column.name}
                   width={columnWidth}
+                  padding={columnPadding}
                   cell={{ text: valueText(column, row), fill: valueFill(column, row) }}
                 />
               ))}
@@ -463,6 +587,7 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
                 whole time you're still inside it. */}
             <CellBox
               width={columnWidth}
+              padding={columnPadding}
               stickyTop="1em"
               cell={{
                 text: stratumText(first, group.rows[0]),
@@ -501,47 +626,68 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
   // Only the header is measured; the body inherits the result. Fitting the
   // whole table would re-measure every mounted cell on each step of the
   // search for a size the columns already share.
+  //
+  // This no longer goes through squeezeFg's own search. Every header .fg is
+  // unconstrained by its .bg parent's width -- no min-width:0, no
+  // overflow:hidden anywhere above it (see styles.css) -- so its rendered
+  // rect is always the label's true single-line width, regardless of
+  // whatever width the column happens to be on screen right now, including a
+  // stale minColumnWidth override left over from a previous fit. That means
+  // one measurement is enough, at whatever font size is already rendered --
+  // nothing needs mutating just to take it: font metrics scale linearly with
+  // pixel size for a fixed font-family, so the fit at any other size is a
+  // straight ratio off of it, computed directly rather than searched for.
+  // Nothing here depends on what's currently rendered beyond that one
+  // reference size, so there's no stale state to reconcile and nothing that
+  // can throw.
   const fitFont = useCallback(() => {
     const root = rootRef.current;
     const header = headerRef.current;
-    if (!root || !header || !header.querySelector('div.fg')) return;
-    let fitted: number;
-    try {
-      fitted = squeezeFg(header, 0.98);
-    } catch {
-      return;
-    }
-    // Bounded above by the body font: squeezeFg happily grows text to fill a
-    // wide column, which at a few columns looks like a headline, not a table.
-    // The bound is the raw body font -- 0.98 is breathing room for a fitted
-    // size, not something to shave off the default.
-    //
-    // Floored to a whole pixel, and that is load-bearing, not tidiness. Every
-    // cell's padding is 1em, so a fractional root font size makes the padding
-    // fractional too -- and squeezeFg tests the fit by comparing
-    // getComputedStyle's rounded padding string against getBoundingClientRect's
-    // own subpixel grid. A cell hugs its text, so that comparison lands at
-    // exactly zero, and those two number sources disagreeing by a hair put it
-    // a hair *below* zero instead. Every font in the sweep then reads as
-    // overflowing, the bracket never flips, squeezeFg throws, and the catch
-    // above drops the refit on the floor. Only the very first fit survived
-    // that, because until it ran the root was still on body's whole-pixel
-    // size -- which is exactly why remounting the table looked fixed and
-    // resizing it did nothing. A whole pixel keeps 1em integral and the
-    // arithmetic exact.
+    const wrapper = wrapperRef.current;
+    if (!root || !header || !wrapper || totalColumns === 0) return;
+    const fgs = header.querySelectorAll<HTMLElement>('div.fg');
+    if (fgs.length === 0) return;
+
+    // Read live rather than from the wrapperWidth state: this can run from a
+    // ResizeObserver callback that fires before that state's own observer
+    // has flushed its update, and a stale width here would misjudge the fit.
+    const totalGaps = Math.max(0, totalColumns - 1);
+    const naturalWidth = Math.max(MIN_COL_WIDTH, Math.floor((wrapper.clientWidth - totalGaps) / totalColumns));
+
+    const referenceSize = parseFloat(getComputedStyle(root).fontSize) || MIN_FONT_SIZE;
+    let widestAtReference = 0;
+    fgs.forEach(el => { widestAtReference = Math.max(widestAtReference, el.getBoundingClientRect().width); });
+    if (widestAtReference <= 0) return;
+
+    // Bounded above by the body font: growing text to fill a wide column
+    // would at a few columns read as a headline, not a table. 0.98 is
+    // breathing room for a fitted size, the same margin squeezeFg used to
+    // apply, not something to shave off the default.
     const bodySize = parseFloat(getComputedStyle(document.body).fontSize);
-    const target = Math.max(1, Math.floor(Math.min(fitted, bodySize)));
-    // One size on the root, inherited by every cell, rather than written
-    // onto each .fg in turn: that is what lets an appended block come out at
-    // the right size having measured nothing, so paging never refits. The
-    // header's own cells carry the inline size squeezeFg just set, so they
-    // have to be cleared back to inheriting or they would keep `fitted`
-    // even where the clamp lowered it.
-    root.style.fontSize = `${target}px`;
-    header.querySelectorAll<HTMLElement>('div.fg').forEach(el => {
-      el.style.fontSize = '';
-    });
-  }, []);
+    const exactFit = (referenceSize * naturalWidth) / widestAtReference;
+    const candidate = exactFit * 0.98;
+
+    if (candidate >= MIN_FONT_SIZE) {
+      // Fits at the floor or better -- no override needed, natural width
+      // stands. Floored to a whole pixel: every cell's padding is 1em, and a
+      // fractional root font size makes that padding fractional too, which
+      // is exactly the kind of subpixel mismatch that used to make the old
+      // squeezeFg-based search throw. There's no search left to throw here,
+      // but the whole-pixel floor still keeps 1em integral.
+      const target = Math.max(MIN_FONT_SIZE, Math.floor(Math.min(candidate, bodySize)));
+      root.style.fontSize = `${target}px`;
+      setMinColumnWidth(0);
+    } else {
+      // Too narrow even at the floor. Hold the floor and widen every column
+      // -- not just the offending one, they all share one width -- to
+      // exactly what the worst label needs (the same reference measurement,
+      // rescaled to MIN_FONT_SIZE), with real horizontal padding now that
+      // width is fitting content instead of the other way around.
+      const widestAtMin = widestAtReference * (MIN_FONT_SIZE / referenceSize);
+      root.style.fontSize = `${MIN_FONT_SIZE}px`;
+      setMinColumnWidth(Math.ceil(widestAtMin) + 2 * MIN_FONT_SIZE);
+    }
+  }, [totalColumns]);
 
   // The header's own geometry only changes with the column set, so that --
   // and the window resizing under it -- is the whole trigger list. Notably
@@ -555,6 +701,12 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
     observer.observe(root);
     return () => observer.disconnect();
   }, [fitFont, table, strataOrder, valuesOrder]);
+
+  // Cleans up if this view unmounts mid-drag (e.g. Clear navigates away
+  // while a pointer is still down) -- otherwise the class useColumnDrag
+  // toggles, and the forced cursor it carries, would stick around on
+  // whatever view comes next.
+  useEffect(() => () => { document.body.classList.remove('dragging-pointer'); }, []);
 
   // clientWidth, not the wrapper's own offset/outer width: for a scrolling
   // container that's the visible viewport size, excluding whatever's
@@ -638,9 +790,10 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
 // be called conditionally inline the way the value headers' map callback
 // does above -- this is exactly one call site, not a loop, so there's
 // nothing conditional about it.
-function ReorderableStratumHeader({ column, columnWidth, options, selected, onSelect, onReorder }: {
+function ReorderableStratumHeader({ column, columnWidth, columnPadding, options, selected, onSelect, onReorder }: {
   column: StratumColumn;
   columnWidth: number;
+  columnPadding: string;
   options: Option[];
   selected: string;
   onSelect: (value: string) => void;
@@ -658,10 +811,8 @@ function ReorderableStratumHeader({ column, columnWidth, options, selected, onSe
       onSelect={onSelect}
       // A fixed width, not a flex share -- see the long note on CellBox for
       // why this can't be left to a proportional split any more.
-      style={{ flex: '0 0 auto', width: columnWidth, padding: '1em 0' }}
+      style={{ flex: '0 0 auto', width: columnWidth, padding: columnPadding }}
       onPointerDown={drag.onPointerDown}
-      onPointerMove={drag.onPointerMove}
-      onPointerUp={drag.onPointerUp}
       onClickCapture={drag.onClickCapture}
       dataColumnName={column.name}
     />
@@ -675,14 +826,15 @@ function ReorderableStratumHeader({ column, columnWidth, options, selected, onSe
 // that.
 // No italic here, unlike the stratum headers: italic means "this column is
 // filtering the rows", and clicking a value header only colors it.
-function DraggableValueHeaderCell({ column, columnWidth, onSelect, onReorder }: {
+function DraggableValueHeaderCell({ column, columnWidth, columnPadding, onSelect, onReorder }: {
   column: ValueColumn;
   columnWidth: number;
+  columnPadding: string;
   onSelect: () => void;
   onReorder: (from: string, to: string) => void;
 }) {
   const drag = useColumnDrag(column.name, onReorder);
   return (
-    <CellBox width={columnWidth} dragProps={drag} cell={{ text: humanize(column.name), onClick: onSelect }} />
+    <CellBox width={columnWidth} padding={columnPadding} dragProps={drag} cell={{ text: humanize(column.name), onClick: onSelect }} />
   );
 }

@@ -30,8 +30,6 @@ type Props = {
   italic?: boolean;
   style?: React.CSSProperties;
   onPointerDown?: (event: React.PointerEvent) => void;
-  onPointerMove?: (event: React.PointerEvent) => void;
-  onPointerUp?: (event: React.PointerEvent) => void;
   onClickCapture?: (event: React.MouseEvent) => void;
   dataColumnName?: string;
 };
@@ -58,7 +56,7 @@ const CELL_H = 20;
 
 export default function Dropdown({
   options, selected, label, onSelect, empty, grayed, italic,
-  style, onPointerDown, onPointerMove, onPointerUp, onClickCapture, dataColumnName,
+  style, onPointerDown, onClickCapture, dataColumnName,
 }: Props) {
   const [anchor, setAnchor] = useState<Anchor | null>(null);
   const [shown, setShown] = useState(PAGE);
@@ -150,8 +148,6 @@ export default function Dropdown({
       onClick={() => (open ? setAnchor(null) : openDropdown())}
       onClickCapture={onClickCapture}
       onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
     >
       {/* Even an empty slot keeps a real fg: a bg with none collapses to
           nothing under squeezeFg, which is what threw whole columns of

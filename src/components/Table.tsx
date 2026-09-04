@@ -654,16 +654,38 @@ export default function Table({ table, activeColumn, onSelectColumn, onBack, onC
     const totalGaps = Math.max(0, totalColumns - 1);
     const naturalWidth = Math.max(MIN_COL_WIDTH, Math.floor((wrapper.clientWidth - totalGaps) / totalColumns));
 
-    const referenceSize = parseFloat(getComputedStyle(root).fontSize) || MIN_FONT_SIZE;
+    // Measured at a fixed reference size, never at whatever root's font-size
+    // already happens to be: this runs again on every window resize (and
+    // root's own write below feeds right back into that trigger), so reading
+    // root's *current* size here would make each call's reference the
+    // previous call's own output. Glyph advance widths get hinted to whole
+    // device pixels, and that rounding is coarser at a fractional
+    // device-pixel-ratio -- which is the common case on Windows (125%/150%
+    // display scaling is a default there, and dragging a window across
+    // monitors with different scaling changes it live) but rare on macOS
+    // (a clean 2x) or Linux (usually a clean 1x). One call's rounding noise
+    // is invisible; feeding it back in as the next call's reference lets it
+    // compound, drifting the fit further off with every resize until it
+    // bottoms out at MIN_FONT_SIZE, or ping-pongs between adjacent pixel
+    // values once the drift stops being reproducible call to call -- the
+    // "tiny and flickering" failure this used to be able to hit on Windows.
+    // Body size never changes, so measuring against it every time makes
+    // this call self-correcting instead of self-compounding, matching what
+    // the comment above already claims: nothing here should depend on
+    // what's currently rendered beyond that one reference size.
+    const bodySize = parseFloat(getComputedStyle(document.body).fontSize);
+    const referenceSize = bodySize;
+    const previousSize = root.style.fontSize;
+    root.style.fontSize = `${referenceSize}px`;
     let widestAtReference = 0;
     fgs.forEach(el => { widestAtReference = Math.max(widestAtReference, el.getBoundingClientRect().width); });
+    root.style.fontSize = previousSize;
     if (widestAtReference <= 0) return;
 
     // Bounded above by the body font: growing text to fill a wide column
     // would at a few columns read as a headline, not a table. 0.98 is
     // breathing room for a fitted size, the same margin squeezeFg used to
     // apply, not something to shave off the default.
-    const bodySize = parseFloat(getComputedStyle(document.body).fontSize);
     const exactFit = (referenceSize * naturalWidth) / widestAtReference;
     const candidate = exactFit * 0.98;
 
